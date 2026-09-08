@@ -10845,10 +10845,12 @@ void ProgramImplCore::restore_sequence_kvarn_tail(SequenceState& sequence,
         }
         const qwen3_6::PagedKVCacheView view =
             cache.execution_view(addresses.execution_row(address));
+        std::array<ops::KvarnPagedLayerView, TextConfig::full_attention_layers()> layers;
         for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
-            ops::kvarn_restore_tail(checked_i32(frontier, "KVarN tail frontier"),
-                                    view.kvarn_layer_view(layer), device.stream);
+            layers[layer] = view.kvarn_layer_view(layer);
         }
+        ops::kvarn_restore_tail(checked_i32(frontier, "KVarN tail frontier"),
+                                std::span(layers).first(cache.layers()), device.stream);
     };
     restore(decoder->text_kv, *text_kv_addresses, sequence.kv->text, main_tokens);
     if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {

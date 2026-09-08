@@ -5,6 +5,7 @@
 #include "ops/kvarn/decode.cuh"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1029,7 +1030,7 @@ int run_cache_lifecycle_case() {
     failures +=
         run_cached_attention_case(cache, 16, 2 * kGroup + 2, 6, "KVarN H16/KV2 width-6 attention");
 
-    ops::kvarn_restore_tail(150, cache.layer_view(), nullptr);
+    ops::kvarn_restore_tail(150, std::array{cache.layer_view()}, nullptr);
     cuda_synchronize();
     const auto restored_markers = from_device<std::int32_t>(cache.markers, ops::kKvarnTailSlots);
     failures += verify_exact("KVarN restored tail markers", restored_markers,
@@ -1353,62 +1354,125 @@ int run_speculative_boundary_case(int width, int valid, int accepted, int first)
     return failures;
 }
 
+template <int Heads, int Layers>
 int run_publication_settlement_case() {
-    constexpr int Heads             = 2;
     constexpr int First             = 2 * kGroup - 2;
-    const auto key                  = make_cache_values(First + 6, 0xface01, Heads);
-    const auto value                = make_cache_values(First + 6, 0xface02, Heads);
     const std::size_t prefix_values = static_cast<std::size_t>(First) * Heads * kD;
     int failures                    = 0;
-    for (const int committed : {1, 4}) {
-        CacheFixture<Heads> cache;
-        append_cache(cache, {key.begin(), key.begin() + prefix_values},
-                     {value.begin(), value.begin() + prefix_values}, 0, false);
-        append_cache(cache, {key.begin() + prefix_values, key.end()},
-                     {value.begin() + prefix_values, value.end()}, First, true);
-        const int frontier = First + committed;
-        ops::kvarn_restore_tail(frontier, cache.layer_view(), nullptr);
-        cuda_synchronize();
-        const auto markers  = from_device<std::int32_t>(cache.markers, ops::kKvarnTailSlots);
-        const auto actual_k = from_device<std::uint16_t>(cache.tail_k, cache.tail_k.bytes / 2);
-        const auto actual_v = from_device<std::uint16_t>(cache.tail_v, cache.tail_v.bytes / 2);
-        const int page      = frontier / kGroup;
-        const auto marker   = std::find(markers.begin(), markers.end(), page);
-        if (marker == markers.end()) {
-            std::cerr << "KVarN publication lost the partial tail\n";
-            return 1;
+    for (const int committed : {1, 2, 4}) {
+        std::array<CacheFixture<Heads>, Layers> caches;
+        std::array<ops::KvarnPagedLayerView, Layers> views;
+        std::array<std::vector<float>, Layers> keys, values;
+        for (int layer = 0; layer < Layers; ++layer) {
+            auto& cache = caches[layer];
+            auto& key = keys[layer] = make_cache_values(First + 6, 0xface01 + layer * 2, Heads);
+            auto& value = values[layer] = make_cache_values(First + 6, 0xface02 + layer * 2, Heads);
+            // Exact FP32 Hadamard sums let the FP64 oracle check retained BF16 bits directly.
+            for (float& x : key) { x = std::round(x * 128.0F) / 128.0F; }
+            for (float& x : value) { x = std::round(x * 128.0F) / 128.0F; }
+            append_cache(cache, {key.begin(), key.begin() + prefix_values},
+                         {value.begin(), value.begin() + prefix_values}, 0, false);
+            append_cache(cache, {key.begin() + prefix_values, key.end()},
+                         {value.begin() + prefix_values, value.end()}, First, true);
+            views[layer] = cache.layer_view();
         }
-        const int slot = static_cast<int>(marker - markers.begin());
-        for (int position = page * kGroup; position < frontier; ++position) {
-            for (int head = 0; head < Heads; ++head) {
-                for (int d = 0; d < kD; ++d) {
-                    double k = 0, v = 0;
-                    for (int col = 0; col < kD; ++col) {
-                        const int sign =
-                            (__builtin_popcount(static_cast<unsigned>(d & col)) & 1) ? -1 : 1;
-                        const std::size_t source = col + kD * (head + Heads * position);
-                        k += sign * key[source];
-                        v += sign * value[source];
+        const int frontier = First + committed;
+        if constexpr (Layers > 1) {
+            cudaStream_t stream        = nullptr;
+            cudaGraph_t graph          = nullptr;
+            cudaGraphExec_t executable = nullptr;
+            cuda_check(cudaStreamCreate(&stream), "settlement stream");
+            cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+                       "settlement capture");
+            ops::kvarn_restore_tail(frontier, views, stream);
+            cuda_check(cudaStreamEndCapture(stream, &graph), "end settlement capture");
+            cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
+                       "settlement instantiate");
+            cuda_check(cudaGraphLaunch(executable, stream), "settlement replay");
+            cuda_synchronize(stream);
+            cudaGraphExecDestroy(executable);
+            cudaGraphDestroy(graph);
+            cudaStreamDestroy(stream);
+        } else {
+            ops::kvarn_restore_tail(frontier, views, nullptr);
+        }
+        cuda_synchronize();
+        for (int layer = 0; layer < Layers; ++layer) {
+            auto& cache         = caches[layer];
+            const auto& key     = keys[layer];
+            const auto& value   = values[layer];
+            const auto markers  = from_device<std::int32_t>(cache.markers, ops::kKvarnTailSlots);
+            const auto actual_k = from_device<std::uint16_t>(cache.tail_k, cache.tail_k.bytes / 2);
+            const auto actual_v = from_device<std::uint16_t>(cache.tail_v, cache.tail_v.bytes / 2);
+            const int page      = frontier / kGroup;
+            const auto marker   = std::find(markers.begin(), markers.end(), page);
+            if (frontier % kGroup != 0 && marker == markers.end()) {
+                std::cerr << "KVarN publication lost the partial tail\n";
+                return 1;
+            }
+            const int slot = static_cast<int>(marker - markers.begin());
+            for (int position = page * kGroup; position < frontier; ++position) {
+                for (int head = 0; head < Heads; ++head) {
+                    for (int d = 0; d < kD; ++d) {
+                        double k = 0, v = 0;
+                        for (int col = 0; col < kD; ++col) {
+                            const int sign =
+                                (__builtin_popcount(static_cast<unsigned>(d & col)) & 1) ? -1 : 1;
+                            const std::size_t source = col + kD * (head + Heads * position);
+                            k += sign * key[source];
+                            v += sign * value[source];
+                        }
+                        const std::size_t destination =
+                            d + kD * (position % kGroup + kGroup * (head + Heads * slot));
+                        if (actual_k[destination] != f32_to_bf16(static_cast<float>(k / 16.0)) ||
+                            actual_v[destination] != f32_to_bf16(static_cast<float>(v / 16.0))) {
+                            std::cerr << "KVarN publication tail mismatch layer=" << layer
+                                      << " committed=" << committed << " position=" << position
+                                      << " head=" << head << " d=" << d << '\n';
+                            return 1;
+                        }
                     }
-                    const std::size_t destination =
-                        d + kD * (position % kGroup + kGroup * (head + Heads * slot));
-                    if (actual_k[destination] != f32_to_bf16(static_cast<float>(k / 16.0)) ||
-                        actual_v[destination] != f32_to_bf16(static_cast<float>(v / 16.0))) {
-                        std::cerr << "KVarN publication quantized an unpublished suffix into its "
-                                     "retained prefix\n";
-                        return 1;
+                }
+            }
+            CacheFixture<Heads> expected;
+            const std::size_t kept = static_cast<std::size_t>(frontier) * Heads * kD;
+            append_cache(expected, {key.begin(), key.begin() + kept},
+                         {value.begin(), value.begin() + kept}, 0, false);
+            failures +=
+                verify_exact("KVarN final-publication records",
+                             from_device<std::uint8_t>(cache.records, cache.records.bytes),
+                             from_device<std::uint8_t>(expected.records, expected.records.bytes));
+        }
+        if (committed >= 2) {
+            const std::vector<std::int32_t> packed_markers(ops::kKvarnTailSlots, -1);
+            ops::kvarn_restore_tail(150, views, nullptr);
+            cuda_synchronize();
+            for (auto& cache : caches) {
+                const auto records = from_device<std::uint8_t>(cache.records, cache.records.bytes);
+                const auto k = from_device<std::uint16_t>(cache.tail_k, cache.tail_k.bytes / 2);
+                const auto v = from_device<std::uint16_t>(cache.tail_v, cache.tail_v.bytes / 2);
+                failures +=
+                    verify_exact("KVarN batched historical markers",
+                                 from_device<std::int32_t>(cache.markers, ops::kKvarnTailSlots),
+                                 std::vector<std::int32_t>{0, 1, -1});
+                for (int head = 0; head < Heads; ++head) {
+                    for (int token = 0; token < kGroup; ++token) {
+                        for (int d = 0; d < kD; ++d) {
+                            const auto index = d + kD * (token + kGroup * (head + Heads));
+                            const auto ek    = f32_to_bf16(decode_cache_value(
+                                records, {}, packed_markers, true, kGroup + token, head, Heads, d));
+                            const auto ev =
+                                f32_to_bf16(decode_cache_value(records, {}, packed_markers, false,
+                                                               kGroup + token, head, Heads, d));
+                            if (k[index] != ek || v[index] != ev) {
+                                std::cerr << "KVarN batched historical tail mismatch\n";
+                                return failures + 1;
+                            }
+                        }
                     }
                 }
             }
         }
-        CacheFixture<Heads> expected;
-        const std::size_t kept = static_cast<std::size_t>(frontier) * Heads * kD;
-        append_cache(expected, {key.begin(), key.begin() + kept},
-                     {value.begin(), value.begin() + kept}, 0, false);
-        failures +=
-            verify_exact("KVarN final-publication records",
-                         from_device<std::uint8_t>(cache.records, cache.records.bytes),
-                         from_device<std::uint8_t>(expected.records, expected.records.bytes));
     }
     return failures;
 }
@@ -1572,7 +1636,8 @@ int main() {
     }
     int failures = run_codec_case();
     failures += run_hadamard_case();
-    failures += run_publication_settlement_case();
+    failures += run_publication_settlement_case<2, 1>();
+    failures += run_publication_settlement_case<4, 16>();
     failures += run_append_attention_oracle<4, 24>(0, 384, false);
     failures += run_append_attention_oracle<4, 24>(254, 256, false);
     failures += run_append_attention_oracle<4, 24>(254, 256, true);
@@ -1593,6 +1658,8 @@ int main() {
     failures += run_27b_grouped_decode_case<6>();
     failures += run_27b_grouped_decode_case<8, 7, 32784>();
     failures += run_27b_grouped_decode_case<16, 15, 196624>();
+    failures += run_27b_grouped_decode_case<16, 7, 32784>();
+    failures += run_27b_grouped_decode_case<16, 16, 32784>();
     failures += run_35b_attention_case();
     failures += run_prefill_slab_boundary_case();
     failures += run_batched_attention_case<4>(24, "KVarN H24/KV4 B=2 attention");

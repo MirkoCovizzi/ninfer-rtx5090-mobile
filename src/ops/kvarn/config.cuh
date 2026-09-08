@@ -12,6 +12,7 @@ inline constexpr int VBits             = 2;
 inline constexpr int Iterations        = 8;
 inline constexpr int PrefillSlabTokens = 16384;
 inline constexpr int MtpPackedWindow   = 1024;
+inline constexpr int PackedQueryChunk  = 16;
 inline constexpr int DecodeMidWindow   = 122880;
 inline constexpr int DecodeMidSplits   = 41;
 inline constexpr int DecodeLongSplits  = 82;

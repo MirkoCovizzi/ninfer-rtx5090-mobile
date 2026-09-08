@@ -84,6 +84,56 @@ Independent width-8/16 attention and exact-tail checks passed, as did K7/K15 two
 Host-restoration checks and two fresh 8,192-token K7 executions. This is a small operator-level
 improvement, not a new quality or memory-compression claim.
 
+**Batched Settlement And K15 Dispatch**
+
+Two sequential experiments on the same RTX 5090 Laptop/CUDA 13.1/`sm_120a` configuration retained
+the G128 codec and final-publication semantics. The first batches a row's attention layers into
+one settlement encode launch and one marker/restore launch. A warmed Nsight Systems node trace
+of DFlash2-K7, `32799+512`, measured 78 decode rounds: settlement dropped from 4,992 launches and
+14.961 ms of summed GPU kernel time to 156 launches and 1.164 ms. These are settlement-phase
+measurements, not whole-request savings; the baseline GPU decode span was 2,653.725 ms.
+
+The second experiment, measured on top of batched settlement, dispatches K15's two eight-query
+groups together above the 1,024-key packed threshold, with one shared reduction launch. It does
+not share decoded K/V across those groups or change their per-query split partitions. W16
+provisional-plus-commit medians (three warmups, 30 CUDA-event samples) were:
+
+| Visible keys | Two dispatches, us | One dispatch, us |
+|---:|---:|---:|
+| 8,192, closing group | 273.376 | 249.888 |
+| 8,208 | 181.248 | 178.176 |
+| 32,768, closing group | 520.128 | 516.096 |
+| 32,784 | 441.376 | 437.536 |
+
+128K/192K closing and non-closing cases also ran without a material observed regression, but
+their variable timings do not support a uniform long-context percentage claim.
+
+Each public Engine comparison used Qwen3.8-27B QUASAR NVFP4, the optimized proposal head, CUDA
+Graphs, the 260,096-token corpus at `/tmp/opencode/kvarn-260096-corpus.ids`, 2,048-token prefill
+chunks, 65,536-token capacity, no prefix reuse, one warmup, and three repetitions:
+
+| Experiment | Prompt + decode | Before, tok/s | After, tok/s | Observed change |
+|---|---:|---:|---:|---:|
+| Settlement, K7 | 231 + 1,024 | 57.522 | 57.495 | -0.05% |
+| Settlement, K7 | 8,190 + 512 | 221.032 | 221.350 | +0.14% |
+| Settlement, K7 | 32,799 + 512 | 193.195 | 193.140 | -0.03% |
+| Dispatch, K15 | 231 + 1,024 | 49.701 | 49.887 | +0.38% |
+| Dispatch, K15 | 8,190 + 512 | 277.506 | 278.264 | +0.27% |
+| Dispatch, K15 | 32,799 + 512 | 208.876 | 209.055 | +0.09% |
+
+Acceptance statistics matched within every pair, and runtime reservations were unchanged. The
+settlement comparison is effectively flat end-to-end; K15's gains are small, with short/32K
+differences comparable to run variability. Neither experiment establishes a large inference
+speedup. The retained benefits are reduced settlement work and a modest wide-attention Op gain.
+
+Qualification passed the independent KVarN suite, sixteen-layer settlement/Graph replay and
+exact historical-tail restoration, softmax regression, and runtime mechanisms. MTP5, K7, and
+K15 each reproduced two fresh 8,192-token executions. Real checks also covered K7/K15 two-row
+Vision/Host restoration, MTP5 stop/resume and Vision with zero extra Device slots, K15 eight-row
+eager execution at short/8K prompts, and two-row Graph execution restoring 8,190/8,183-token
+prefixes. The rebuilt server passed 262,144-token-capacity OpenAI stream/nonstream and Anthropic
+smokes. No new broad retrieval or reasoning-quality claim is made.
+
 The product benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
 `Engine::prepare_tokens()`, then calls `Engine::generate()` once for each repetition. It does not
 have a private prefill/decode loop and does not call target implementation interfaces.

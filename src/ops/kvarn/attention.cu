@@ -38,6 +38,10 @@ struct ViewPointers {
     int heads;
 };
 
+struct RestoreViews {
+    ViewPointers layers[16];
+};
+
 int max_touched_pages(int width) { return (width + kvarn::Group - 2) / kvarn::Group + 1; }
 
 void require_view(const KvarnPagedBatchLayerView& view) {
@@ -202,10 +206,10 @@ __device__ kvarn::StorePointers record_pointers(std::uint8_t* record) {
     };
 }
 
-__global__ void encode_kernel(const __nv_bfloat16* key, const __nv_bfloat16* value,
-                              const std::int32_t* positions, const std::int32_t* valid_columns,
-                              const std::int32_t* table_rows, ViewPointers cache, int width,
-                              int batch, int touched_pages, bool masked, int settled_frontier) {
+__device__ __forceinline__ void
+encode_group(const __nv_bfloat16* key, const __nv_bfloat16* value, const std::int32_t* positions,
+             const std::int32_t* valid_columns, const std::int32_t* table_rows, ViewPointers cache,
+             int width, int batch, int touched_pages, bool masked, int settled_frontier) {
     extern __shared__ float shared[];
     auto* tile          = reinterpret_cast<__nv_bfloat16*>(shared);
     const int encoded   = static_cast<int>(blockIdx.x);
@@ -267,6 +271,19 @@ __global__ void encode_kernel(const __nv_bfloat16* key, const __nv_bfloat16* val
     }
 }
 
+__global__ void encode_kernel(const __nv_bfloat16* key, const __nv_bfloat16* value,
+                              const std::int32_t* positions, const std::int32_t* valid_columns,
+                              const std::int32_t* table_rows, ViewPointers cache, int width,
+                              int batch, int touched_pages, bool masked, int settled_frontier) {
+    encode_group(key, value, positions, valid_columns, table_rows, cache, width, batch,
+                 touched_pages, masked, settled_frontier);
+}
+
+__global__ void settle_encode_kernel(const __grid_constant__ RestoreViews views, int frontier) {
+    encode_group(nullptr, nullptr, nullptr, nullptr, nullptr, views.layers[blockIdx.y], 0, 1,
+                 kKvarnTailSlots - kKvarnSinkPages, false, frontier);
+}
+
 __global__ void retire_kernel(const std::int32_t* positions, const std::int32_t* valid_columns,
                               const std::int32_t* table_rows, ViewPointers cache, int width,
                               int batch, int touched_pages, bool masked) {
@@ -293,8 +310,7 @@ __global__ void retire_kernel(const std::int32_t* positions, const std::int32_t*
     }
 }
 
-__global__ void prepare_restore_kernel(std::int32_t* markers, int page, int remainder) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__device__ void prepare_restore(std::int32_t* markers, int page, int remainder) {
     if (remainder == 0 || page < kKvarnSinkPages) {
         markers[kKvarnSinkPages]     = -1;
         markers[kKvarnSinkPages + 1] = -1;
@@ -312,47 +328,52 @@ __global__ void prepare_restore_kernel(std::int32_t* markers, int page, int rema
     markers[kKvarnSinkPages + 1] = -1;
 }
 
-__global__ void restore_tail_kernel(const std::uint8_t* records, __nv_bfloat16* tail_k,
-                                    __nv_bfloat16* tail_v, const std::int32_t* markers,
-                                    const std::int32_t* block_table, int physical_pages, int heads,
-                                    int page) {
+__global__ void restore_tail_kernel(const __grid_constant__ RestoreViews views, int frontier) {
+    const ViewPointers cache = views.layers[blockIdx.x];
+    auto* markers            = cache.markers;
+    const int page           = frontier / kvarn::Group;
+    if (threadIdx.x == 0) { prepare_restore(markers, page, frontier % kvarn::Group); }
+    __syncthreads();
+    if (frontier % kvarn::Group == 0 || page < kKvarnSinkPages) return;
     if (markers[kKvarnSinkPages] != -(page + 2)) return;
-    const int head     = static_cast<int>(blockIdx.x);
     const int d        = static_cast<int>(threadIdx.x);
-    const int physical = block_table[page];
-    if (physical < 0 || physical >= physical_pages) return;
-    const std::uint8_t* record =
-        records + (static_cast<std::int64_t>(physical) * heads + head) * kKvarnRecordBytes;
-    const auto* k_scale       = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
-    const auto* k_zero        = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
-    const auto* k_token_scale = reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
-    const auto* v_channel     = reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
-    const auto* v_scale       = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
-    const auto* v_zero        = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
-    for (int token = 0; token < kvarn::Group; ++token) {
-        const std::uint8_t k_packed =
-            record[kKvarnKPackedOffset + d * (kvarn::Group / 2) + token / 2];
-        const int k_code            = (k_packed >> (4 * (token & 1))) & 15;
-        const std::uint8_t v_packed = record[kKvarnVPackedOffset + token * (kvarn::D / 4) + d / 4];
-        const int v_code            = (v_packed >> (2 * (d & 3))) & 3;
-        const std::int64_t destination =
-            static_cast<std::int64_t>(d) +
-            static_cast<std::int64_t>(kvarn::D) *
-                (token + kvarn::Group * (head + heads * kKvarnSinkPages));
-        const float key =
-            fmaf(static_cast<float>(k_code), __half2float(k_scale[d]), __half2float(k_zero[d])) *
-            __half2float(k_token_scale[token]);
-        const float value = fmaf(static_cast<float>(v_code), __half2float(v_scale[token]),
-                                 __half2float(v_zero[token])) *
-                            __half2float(v_channel[d]);
-        tail_k[destination] = __float2bfloat16_rn(key);
-        tail_v[destination] = __float2bfloat16_rn(value);
+    const int physical = cache.block_tables[page];
+    if (physical < 0 || physical >= cache.physical_pages) return;
+    // One CTA owns a layer's markers and all its heads, so publication needs only a CTA barrier.
+    for (int head = 0; head < cache.heads; ++head) {
+        const std::uint8_t* record =
+            cache.records +
+            (static_cast<std::int64_t>(physical) * cache.heads + head) * kKvarnRecordBytes;
+        const auto* k_scale = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
+        const auto* k_zero  = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
+        const auto* k_token_scale =
+            reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
+        const auto* v_channel = reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
+        const auto* v_scale   = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
+        const auto* v_zero    = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
+        for (int token = 0; token < kvarn::Group; ++token) {
+            const std::uint8_t k_packed =
+                record[kKvarnKPackedOffset + d * (kvarn::Group / 2) + token / 2];
+            const int k_code = (k_packed >> (4 * (token & 1))) & 15;
+            const std::uint8_t v_packed =
+                record[kKvarnVPackedOffset + token * (kvarn::D / 4) + d / 4];
+            const int v_code = (v_packed >> (2 * (d & 3))) & 3;
+            const std::int64_t destination =
+                static_cast<std::int64_t>(d) +
+                static_cast<std::int64_t>(kvarn::D) *
+                    (token + kvarn::Group * (head + cache.heads * kKvarnSinkPages));
+            const float key = fmaf(static_cast<float>(k_code), __half2float(k_scale[d]),
+                                   __half2float(k_zero[d])) *
+                              __half2float(k_token_scale[token]);
+            const float value = fmaf(static_cast<float>(v_code), __half2float(v_scale[token]),
+                                     __half2float(v_zero[token])) *
+                                __half2float(v_channel[d]);
+            cache.tail_k[destination] = __float2bfloat16_rn(key);
+            cache.tail_v[destination] = __float2bfloat16_rn(value);
+        }
     }
-}
-
-__global__ void finalize_restore_kernel(std::int32_t* markers, int page) {
-    if (threadIdx.x == 0 && blockIdx.x == 0 && markers[kKvarnSinkPages] == -(page + 2))
-        markers[kKvarnSinkPages] = page;
+    __syncthreads();
+    if (threadIdx.x == 0) { markers[kKvarnSinkPages] = page; }
 }
 
 void rotate_kv(Tensor key, Tensor value, cudaStream_t stream) {
@@ -450,8 +471,10 @@ std::size_t kvarn_attention_workspace_capacity_bytes(std::int32_t query_heads,
         throw std::invalid_argument("KVarN workspace: unsupported query-head geometry");
     }
     const std::int32_t kv_heads     = query_heads == 24 ? 4 : 2;
-    const std::int32_t decode_width = std::min(
-        max_width, query_heads == 24 && envelope.max_visible_keys > kvarn::MtpPackedWindow ? 8 : 6);
+    const std::int32_t decode_width =
+        std::min(max_width, query_heads == 24 && envelope.max_visible_keys > kvarn::MtpPackedWindow
+                                ? kvarn::PackedQueryChunk
+                                : 6);
     // The BF16 helper owns widths up to six; wider groups retain scalar split partitions.
     const std::int32_t capacity_width = decode_width > 6 ? 1 : decode_width;
     std::size_t decode                = causal_softmax_attention_workspace_capacity_bytes(
@@ -541,56 +564,52 @@ void kvarn_commit_pages(const Tensor& positions, const Tensor& accepted_columns,
     commit_kv({}, {}, positions, accepted_columns, kv_table_rows, cache, stream);
 }
 
-void kvarn_restore_tail(std::int32_t frontier, KvarnPagedLayerView cache, cudaStream_t stream) {
-    const int record_slot = kKvarnRecordBytes / kvarn::Group;
-    if (frontier < 0 || cache.records.dtype != DType::U8 || cache.records.ne[0] != record_slot ||
-        cache.records.ne[1] != kvarn::Group || cache.records.ne[2] != cache.num_kv_heads ||
-        cache.tail_k.dtype != DType::BF16 || cache.tail_v.dtype != DType::BF16 ||
-        cache.tail_k.ne[0] != kvarn::D || cache.tail_k.ne[1] != kvarn::Group ||
-        cache.tail_k.ne[2] != cache.num_kv_heads * kKvarnTailSlots ||
-        cache.tail_v.numel() != cache.tail_k.numel() ||
-        cache.tail_logical_pages.dtype != DType::I32 ||
-        cache.tail_logical_pages.ne[0] != kKvarnTailSlots ||
-        cache.block_table.dtype != DType::I32 || !cache.records.is_contiguous() ||
-        !cache.tail_k.is_contiguous() || !cache.tail_v.is_contiguous() ||
-        !cache.tail_logical_pages.is_contiguous() || !cache.block_table.is_contiguous()) {
-        throw std::invalid_argument("KVarN restore: invalid cache view");
+void kvarn_restore_tail(std::int32_t frontier, std::span<const KvarnPagedLayerView> layers,
+                        cudaStream_t stream) {
+    RestoreViews views{};
+    if (layers.empty() || layers.size() > std::size(views.layers)) {
+        throw std::invalid_argument("KVarN restore requires one to sixteen layers");
     }
-    const int page      = frontier / kvarn::Group;
-    const int remainder = frontier % kvarn::Group;
-    const ViewPointers view{static_cast<std::uint8_t*>(cache.records.data),
-                            static_cast<__nv_bfloat16*>(cache.tail_k.data),
-                            static_cast<__nv_bfloat16*>(cache.tail_v.data),
-                            static_cast<std::int32_t*>(cache.tail_logical_pages.data),
-                            static_cast<const std::int32_t*>(cache.block_table.data),
-                            cache.records.ne[3],
-                            cache.block_table.ne[0],
-                            1,
-                            cache.num_kv_heads};
+    int heads = 0;
+    for (std::size_t layer = 0; layer < layers.size(); ++layer) {
+        const auto& cache     = layers[layer];
+        const int record_slot = kKvarnRecordBytes / kvarn::Group;
+        if (frontier < 0 || cache.records.dtype != DType::U8 ||
+            cache.records.ne[0] != record_slot || cache.records.ne[1] != kvarn::Group ||
+            cache.records.ne[2] != cache.num_kv_heads || cache.tail_k.dtype != DType::BF16 ||
+            cache.tail_v.dtype != DType::BF16 || cache.tail_k.ne[0] != kvarn::D ||
+            cache.tail_k.ne[1] != kvarn::Group ||
+            cache.tail_k.ne[2] != cache.num_kv_heads * kKvarnTailSlots ||
+            cache.tail_v.numel() != cache.tail_k.numel() ||
+            cache.tail_logical_pages.dtype != DType::I32 ||
+            cache.tail_logical_pages.ne[0] != kKvarnTailSlots ||
+            cache.block_table.dtype != DType::I32 || !cache.records.is_contiguous() ||
+            !cache.tail_k.is_contiguous() || !cache.tail_v.is_contiguous() ||
+            !cache.tail_logical_pages.is_contiguous() || !cache.block_table.is_contiguous()) {
+            throw std::invalid_argument("KVarN restore: invalid cache view");
+        }
+        views.layers[layer] =
+            ViewPointers{static_cast<std::uint8_t*>(cache.records.data),
+                         static_cast<__nv_bfloat16*>(cache.tail_k.data),
+                         static_cast<__nv_bfloat16*>(cache.tail_v.data),
+                         static_cast<std::int32_t*>(cache.tail_logical_pages.data),
+                         static_cast<const std::int32_t*>(cache.block_table.data),
+                         cache.records.ne[3],
+                         cache.block_table.ne[0],
+                         1,
+                         cache.num_kv_heads};
+        heads = std::max(heads, cache.num_kv_heads);
+    }
     static const cudaError_t encode_attribute =
-        cudaFuncSetAttribute(encode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        cudaFuncSetAttribute(settle_encode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              static_cast<int>(kStoreSharedBytes));
     CUDA_CHECK(encode_attribute);
     constexpr int tails = kKvarnTailSlots - kKvarnSinkPages;
-    encode_kernel<<<2 * tails * cache.num_kv_heads, kThreads, kStoreSharedBytes, stream>>>(
-        nullptr, nullptr, nullptr, nullptr, nullptr, view, 0, 1, tails, false, frontier);
+    const dim3 grid(2 * tails * heads, static_cast<unsigned>(layers.size()));
+    settle_encode_kernel<<<grid, kThreads, kStoreSharedBytes, stream>>>(views, frontier);
     CUDA_CHECK(cudaGetLastError());
-    prepare_restore_kernel<<<1, 1, 0, stream>>>(
-        static_cast<std::int32_t*>(cache.tail_logical_pages.data), page, remainder);
+    restore_tail_kernel<<<layers.size(), kThreads, 0, stream>>>(views, frontier);
     CUDA_CHECK(cudaGetLastError());
-    if (remainder != 0 && page >= kKvarnSinkPages) {
-        restore_tail_kernel<<<cache.num_kv_heads, kThreads, 0, stream>>>(
-            static_cast<const std::uint8_t*>(cache.records.data),
-            static_cast<__nv_bfloat16*>(cache.tail_k.data),
-            static_cast<__nv_bfloat16*>(cache.tail_v.data),
-            static_cast<const std::int32_t*>(cache.tail_logical_pages.data),
-            static_cast<const std::int32_t*>(cache.block_table.data), cache.records.ne[3],
-            cache.num_kv_heads, page);
-        CUDA_CHECK(cudaGetLastError());
-        finalize_restore_kernel<<<1, 1, 0, stream>>>(
-            static_cast<std::int32_t*>(cache.tail_logical_pages.data), page);
-        CUDA_CHECK(cudaGetLastError());
-    }
 }
 
 } // namespace ninfer::ops

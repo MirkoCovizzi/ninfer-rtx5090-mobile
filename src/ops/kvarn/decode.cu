@@ -155,8 +155,9 @@ void decode_attention(const Tensor& query, const Tensor& positions, const Tensor
     Tensor rotated_query = query;
     kvarn_hadamard(query, rotated_query, stream);
     const int kChunk =
-        query.ne[1] == CausalD256H24Kv4::QHeads && envelope.max_visible_keys > MtpPackedWindow ? 8
-                                                                                               : 6;
+        query.ne[1] == CausalD256H24Kv4::QHeads && envelope.max_visible_keys > MtpPackedWindow
+            ? PackedQueryChunk
+            : 6;
     for (int begin = 0; begin < query.ne[2]; begin += kChunk) {
         const int width    = std::min(kChunk, query.ne[2] - begin);
         auto scope         = workspace.scope();

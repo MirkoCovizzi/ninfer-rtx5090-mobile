@@ -114,6 +114,11 @@ known. Rejected suffixes never enter committed records and remain
 overwritable in the tail. Encoding immediately after commitment is equivalent, for the next
 attention call, to Huawei's flush of previously committed groups before the next step.
 
+Settlement batches up to sixteen disjoint layers at one finalized frontier without device
+scratch. One encode launch completes before one fused marker/restore launch; each restore CTA
+owns a layer's markers and all its heads. Rows and Main/MTP pools remain separately ordered.
+This removes per-layer launch sequences without moving encoding before final publication.
+
 The reference policy is step-dependent: a speculative block can retain unquantized values longer
 than token-at-a-time decoding. Exact ordinary-versus-speculative token identity is not a KVarN
 contract. Prefix-state ownership and acceptance still preserve the exact selected execution state.
@@ -123,6 +128,10 @@ G128 records are staged in 64-token slices to bound shared-memory use; this does
 128-token quantization group or its metadata. Sinkhorn staging keeps the represented BF16 input
 in shared memory and performs normalization in FP32. Inactive query groups still participate in
 shared K/V staging and CTA barriers.
+
+H24/KV4 packed decode dispatches up to sixteen queries together using eight-column CTA groups
+and one reduction launch. The groups do not share their staged K/V with each other; every query
+retains its own split partition and causal mask.
 
 #### Paper And Reference Alignment
 

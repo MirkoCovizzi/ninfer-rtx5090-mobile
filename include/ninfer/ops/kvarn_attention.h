@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace ninfer::ops {
 
@@ -45,6 +46,8 @@ void kvarn_commit_pages(const Tensor& positions, const Tensor& accepted_columns,
 // Settles completed live groups through the final committed frontier and re-establishes its
 // writable tail. A historical partial group is decoded; an already-live partial tail is preserved.
 // Runtime calls this after output publication has selected the actual prefix, not at licensing.
-void kvarn_restore_tail(std::int32_t frontier, KvarnPagedLayerView cache, cudaStream_t stream);
+// Batches one to sixteen disjoint layer views at the same frontier without device scratch.
+void kvarn_restore_tail(std::int32_t frontier, std::span<const KvarnPagedLayerView> layers,
+                        cudaStream_t stream);
 
 } // namespace ninfer::ops
