@@ -1577,6 +1577,11 @@ int main() {
     failures += run_append_attention_oracle<4, 24>(254, 256, false);
     failures += run_append_attention_oracle<4, 24>(254, 256, true);
     failures += run_append_attention_oracle<2, 16>(254, 256, false);
+    for (const int width : {8, 16}) {
+        failures += run_append_attention_oracle<4, 24>(254, width, false);
+        failures += run_append_attention_oracle<2, 16>(254, width, false);
+        failures += run_append_attention_oracle<4, 24>(254, width, true);
+    }
     failures += run_cache_lifecycle_case();
     failures += run_27b_attention_case();
     failures += run_27b_grouped_decode_case<2>();
@@ -1593,6 +1598,7 @@ int main() {
     failures += run_batched_attention_case<4>(24, "KVarN H24/KV4 B=2 attention");
     failures += run_batched_attention_case<2>(16, "KVarN H16/KV2 B=2 attention");
     failures += run_tail_staging_case(6);
+    failures += run_tail_staging_case(8);
     failures += run_tail_staging_case(16);
     for (int width = 1; width <= 6; ++width) {
         failures += run_speculative_boundary_case<4, 24>(width, width, 1, 2111);

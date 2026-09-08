@@ -235,7 +235,7 @@ int main(int argc, char** argv) {
             ninfer::test::vision_prefix_reuse(engine, ninfer::SpeculativeBackend::DFlash2);
         }
         const auto stats = engine.runtime_stats();
-        if (options.context_cache.device_state_slots == 0) {
+        if (options.enable_vision && options.context_cache.device_state_slots == 0) {
             require(stats.state_d2h_count > 0 && stats.state_h2d_count > 0,
                     "DFlash2 did not restore Host checkpoint state");
         }

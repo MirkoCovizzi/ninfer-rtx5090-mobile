@@ -56,6 +56,34 @@ The native implementation retains scalar/four/eight-column decode and stages G12
 after commitment. Performance results for the previous G64/early-encoding path do not qualify
 this implementation. Measure the current preset and report acceptance with throughput.
 
+**Fused Wide Staging**
+
+KVarN fuses K/V rotation into tail staging through width 16, including DFlash2 K7/K15
+verification. This removes two standalone Hadamard launches without changing the G128 codec,
+commitment timing, or workspace reservation. On RTX 5090 Laptop GPU, CUDA 13.1, `sm_120a`, the
+H24/KV4 provisional-plus-commit benchmark used three warmups and 30 CUDA-event samples:
+
+| Visible keys | Width | Separate rotation, median us | Fused staging, median us |
+|---:|---:|---:|---:|
+| 8,192, closing group | 8 | 183.296 | 180.704 |
+| 8,208 | 8 | 87.040 | 83.968 |
+| 8,208 | 16 | 184.032 | 181.216 |
+| 32,768, closing group | 8 | 308.160 | 304.384 |
+| 32,784 | 8 | 228.832 | 224.416 |
+| 32,784 | 16 | 444.416 | 441.088 |
+
+A matched public Engine comparison used Qwen3.8-27B QUASAR NVFP4, DFlash2-K7, optimized proposal
+head, CUDA Graphs, 2,048-token prefill chunks, 65,536-token capacity, no prefix reuse, one warmup,
+and three measured repetitions. Decode throughput for `231+1024`, `8190+512`, and `32799+512`
+changed from 57.536/221.181/192.721 to 57.593/221.371/193.078 tok/s. Acceptance was identical
+at 10.30%/83.56%/80.37%, and memory reservations were unchanged. These 0.09%-0.19% differences
+are too small to establish a significant end-to-end speedup. The 192K Op samples were variable;
+no uniform long-context percentage gain is claimed.
+
+Independent width-8/16 attention and exact-tail checks passed, as did K7/K15 two-row Vision and
+Host-restoration checks and two fresh 8,192-token K7 executions. This is a small operator-level
+improvement, not a new quality or memory-compression claim.
+
 The product benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
 `Engine::prepare_tokens()`, then calls `Engine::generate()` once for each repetition. It does not
 have a private prefill/decode loop and does not call target implementation interfaces.

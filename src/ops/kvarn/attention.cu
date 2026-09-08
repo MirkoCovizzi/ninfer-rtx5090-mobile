@@ -22,7 +22,7 @@ namespace ninfer::ops {
 namespace {
 
 constexpr int kThreads            = 256;
-constexpr int kFusedStageMaxWidth = 6;
+constexpr int kFusedStageMaxWidth = 16;
 constexpr std::size_t kStoreSharedBytes =
     (kvarn::D + 1) * kvarn::Group * sizeof(__nv_bfloat16) + (8 * kvarn::D + 16) * sizeof(float);
 
