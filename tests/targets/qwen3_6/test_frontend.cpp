@@ -999,6 +999,15 @@ int test_rewrite_checkpoint_trace() {
                           next.rewrite_checkpoint->offset == final_header,
                       "new user turn did not move the rewrite boundary before its generation "
                       "opener");
+    for (const fi::RenderedChat* rendered : {&open, &preserved, &nonthinking, &next}) {
+        for (auto offset = rendered->text.find(assistant_header); offset != std::string::npos;
+             offset = rendered->text.find(assistant_header, offset + assistant_header.size())) {
+            failures +=
+                check(std::binary_search(rendered->rewrite_execution_boundaries.begin(),
+                                         rendered->rewrite_execution_boundaries.end(), offset),
+                      "assistant checkpoint boundary is missing from canonical execution history");
+        }
+    }
 
     const fi::RenderedChat branch =
         render_chat({chat_message(ninfer::ChatRole::User, "question"),
@@ -1171,6 +1180,13 @@ int test_text_and_image_prepare(const Frontend& frontend) {
     });
     auto prepared             = frontend.prepare(std::move(image_input));
     const auto& prepared_data = FrontendFactory::inspect(prepared);
+    for (const auto& opportunity : prepared_data.context_cache.opportunities) {
+        failures +=
+            check(std::binary_search(prepared_data.identity.rewrite_execution_frontiers.begin(),
+                                     prepared_data.identity.rewrite_execution_frontiers.end(),
+                                     opportunity.frontier),
+                  "prepared capture opportunity can change the arithmetic schedule");
+    }
     failures += check(prepared_data.has_media() && prepared_data.vision_items.size() == 1,
                       "image frontend did not retain one Vision item");
     if (!prepared_data.vision_items.empty()) {

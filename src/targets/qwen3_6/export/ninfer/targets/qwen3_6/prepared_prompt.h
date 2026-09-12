@@ -83,9 +83,10 @@ struct RewriteCheckpointSpec {
 struct PromptIdentity {
     bool reusable = true;
     std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
-    // Exact token frontiers at which this serialization can agree with a typed rewrite captured
-    // by an earlier turn. Prefill splits at these frontiers so resumed and root execution use the
-    // same GDN decomposition; they are not capture requests by themselves.
+    // Canonical prefill frontiers for this serialization, including typed rewrites and prepared
+    // capture opportunities. They are execution boundaries whether or not caching is enabled or
+    // a capture is admitted: retention policy must not change arithmetic/quantization profiles.
+    // They are not capture requests by themselves.
     std::vector<std::uint32_t> rewrite_execution_frontiers;
 };
 
