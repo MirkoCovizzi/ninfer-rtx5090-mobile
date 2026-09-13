@@ -452,13 +452,13 @@ ArtifactProfile inspect_artifact(const std::filesystem::path& artifact_path) {
     ArtifactProfile result{
         .path = path, .model_id = identity.model_id, .weights_id = identity.weights_id};
     if (identity.model_id == targets::qwen3_6_27b::Package::model_id) {
-        (void)targets::qwen3_6_27b::Package::resolve_weights(identity);
+        (void)targets::qwen3_6_27b::Package::resolve_weights(reader);
         result.target_key = std::string(targets::qwen3_6_27b::Package::target_key);
     } else if (identity.model_id == targets::qwen3_6_27b::Package::qwen3_8_model_id) {
-        (void)targets::qwen3_6_27b::Package::resolve_weights(identity);
+        (void)targets::qwen3_6_27b::Package::resolve_weights(reader);
         result.target_key = std::string(targets::qwen3_6_27b::Package::qwen3_8_target_key);
     } else if (identity.model_id == targets::qwen3_6_35b_a3b::Package::model_id) {
-        (void)targets::qwen3_6_35b_a3b::Package::resolve_weights(identity);
+        (void)targets::qwen3_6_35b_a3b::Package::resolve_weights(reader);
         result.target_key = std::string(targets::qwen3_6_35b_a3b::Package::target_key);
     } else {
         throw std::invalid_argument(
