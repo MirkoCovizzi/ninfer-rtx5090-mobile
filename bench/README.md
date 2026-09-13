@@ -19,7 +19,122 @@ cmake --build build --parallel --target ninfer_bench
 
 ## Product benchmark
 
-The benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
+For KVarN, use at least 128 decode tokens and include non-page-aligned prompt lengths so the
+measurement includes periodic 128-token group encoding and speculative group-boundary handling.
+Record acceptance alongside throughput; a short, all-accepted run is not representative of every
+MTP workload.
+
+`ninfer_kvarn_attention_bench --context N` measures cached attention, committed append, provisional
+widths 1 through 6, and a prefill append-and-attend chunk ending at visible context `N`. Each sample
+restores Q/K/V and the exact pre-append cache state outside the timed interval. `closes_page=1`
+identifies samples containing page-closing Sinkhorn work. Compare, for example, `--context 8192`
+with `--context 8198` to distinguish closure cost from ordinary small-width append cost. Do not interpret the
+former as an amortized per-token latency.
+
+Use `--phase cached|append|provisional|prefill` and `--width 1..16` to isolate a decode/append
+case for kernel profiling; omit `--width` for the 1,024-token prefill case. `--batch 1..8` uses
+independent cache rows with equal context lengths; prefill is measured only at batch one.
+Provisional cases supply explicit valid-column counts and include all-valid acceptance/commit,
+as a complete accepted Engine round does. Multi-row cases use
+the runtime's conservative lower execution-envelope bound by default. `--tight-envelope` instead
+uses the exact common frontier to measure launch overprovisioning on this homogeneous fixture;
+it is not a production optimization or evidence that arbitrary mixed-row graphs can use that bound.
+Explicit widths 7..16 select provisional Op calls; the default sweep remains 1..6. These wider
+H24/KV4 calls use eight-column chunks above 1,024 visible keys, not an Engine MTP depth above five.
+
+```bash
+./build/bench/ninfer_kvarn_attention_bench --context 196614 --phase provisional --width 4
+./build/bench/ninfer_kvarn_attention_bench --context 32774 --phase provisional --width 4 --batch 2
+```
+
+**KVarN Qualification**
+
+The K4V2-G128 mathematical contract and execution checks are maintained in
+[`paged-kv-cache.md`](../docs/maintainer/paged-kv-cache.md#execution-regression).
+The native implementation retains scalar/four/eight-column decode and stages G128 records in
+64-token slices. Current-step values remain unquantized through attention; group encoding occurs
+after commitment. Performance results for the previous G64/early-encoding path do not qualify
+this implementation. Measure the current preset and report acceptance with throughput.
+
+**Fused Wide Staging**
+
+KVarN fuses K/V rotation into tail staging through width 16, including DFlash2 K7/K15
+verification. This removes two standalone Hadamard launches without changing the G128 codec,
+commitment timing, or workspace reservation. On RTX 5090 Laptop GPU, CUDA 13.1, `sm_120a`, the
+H24/KV4 provisional-plus-commit benchmark used three warmups and 30 CUDA-event samples:
+
+| Visible keys | Width | Separate rotation, median us | Fused staging, median us |
+|---:|---:|---:|---:|
+| 8,192, closing group | 8 | 183.296 | 180.704 |
+| 8,208 | 8 | 87.040 | 83.968 |
+| 8,208 | 16 | 184.032 | 181.216 |
+| 32,768, closing group | 8 | 308.160 | 304.384 |
+| 32,784 | 8 | 228.832 | 224.416 |
+| 32,784 | 16 | 444.416 | 441.088 |
+
+A matched public Engine comparison used Qwen3.8-27B QUASAR NVFP4, DFlash2-K7, optimized proposal
+head, CUDA Graphs, 2,048-token prefill chunks, 65,536-token capacity, no prefix reuse, one warmup,
+and three measured repetitions. Decode throughput for `231+1024`, `8190+512`, and `32799+512`
+changed from 57.536/221.181/192.721 to 57.593/221.371/193.078 tok/s. Acceptance was identical
+at 10.30%/83.56%/80.37%, and memory reservations were unchanged. These 0.09%-0.19% differences
+are too small to establish a significant end-to-end speedup. The 192K Op samples were variable;
+no uniform long-context percentage gain is claimed.
+
+Independent width-8/16 attention and exact-tail checks passed, as did K7/K15 two-row Vision and
+Host-restoration checks and two fresh 8,192-token K7 executions. This is a small operator-level
+improvement, not a new quality or memory-compression claim.
+
+**Batched Settlement And K15 Dispatch**
+
+Two sequential experiments on the same RTX 5090 Laptop/CUDA 13.1/`sm_120a` configuration retained
+the G128 codec and final-publication semantics. The first batches a row's attention layers into
+one settlement encode launch and one marker/restore launch. A warmed Nsight Systems node trace
+of DFlash2-K7, `32799+512`, measured 78 decode rounds: settlement dropped from 4,992 launches and
+14.961 ms of summed GPU kernel time to 156 launches and 1.164 ms. These are settlement-phase
+measurements, not whole-request savings; the baseline GPU decode span was 2,653.725 ms.
+
+The second experiment, measured on top of batched settlement, dispatches K15's two eight-query
+groups together above the 1,024-key packed threshold, with one shared reduction launch. It does
+not share decoded K/V across those groups or change their per-query split partitions. W16
+provisional-plus-commit medians (three warmups, 30 CUDA-event samples) were:
+
+| Visible keys | Two dispatches, us | One dispatch, us |
+|---:|---:|---:|
+| 8,192, closing group | 273.376 | 249.888 |
+| 8,208 | 181.248 | 178.176 |
+| 32,768, closing group | 520.128 | 516.096 |
+| 32,784 | 441.376 | 437.536 |
+
+128K/192K closing and non-closing cases also ran without a material observed regression, but
+their variable timings do not support a uniform long-context percentage claim.
+
+Each public Engine comparison used Qwen3.8-27B QUASAR NVFP4, the optimized proposal head, CUDA
+Graphs, the 260,096-token corpus at `/tmp/opencode/kvarn-260096-corpus.ids`, 2,048-token prefill
+chunks, 65,536-token capacity, no prefix reuse, one warmup, and three repetitions:
+
+| Experiment | Prompt + decode | Before, tok/s | After, tok/s | Observed change |
+|---|---:|---:|---:|---:|
+| Settlement, K7 | 231 + 1,024 | 57.522 | 57.495 | -0.05% |
+| Settlement, K7 | 8,190 + 512 | 221.032 | 221.350 | +0.14% |
+| Settlement, K7 | 32,799 + 512 | 193.195 | 193.140 | -0.03% |
+| Dispatch, K15 | 231 + 1,024 | 49.701 | 49.887 | +0.38% |
+| Dispatch, K15 | 8,190 + 512 | 277.506 | 278.264 | +0.27% |
+| Dispatch, K15 | 32,799 + 512 | 208.876 | 209.055 | +0.09% |
+
+Acceptance statistics matched within every pair, and runtime reservations were unchanged. The
+settlement comparison is effectively flat end-to-end; K15's gains are small, with short/32K
+differences comparable to run variability. Neither experiment establishes a large inference
+speedup. The retained benefits are reduced settlement work and a modest wide-attention Op gain.
+
+Qualification passed the independent KVarN suite, sixteen-layer settlement/Graph replay and
+exact historical-tail restoration, softmax regression, and runtime mechanisms. MTP5, K7, and
+K15 each reproduced two fresh 8,192-token executions. Real checks also covered K7/K15 two-row
+Vision/Host restoration, MTP5 stop/resume and Vision with zero extra Device slots, K15 eight-row
+eager execution at short/8K prompts, and two-row Graph execution restoring 8,190/8,183-token
+prefixes. The rebuilt server passed 262,144-token-capacity OpenAI stream/nonstream and Anthropic
+smokes. No new broad retrieval or reasoning-quality claim is made.
+
+The product benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
 `Engine::prepare_tokens()`, then calls `Engine::generate()` once for each repetition. It does not
 have a private prefill/decode loop and does not call target implementation interfaces.
 
@@ -48,7 +163,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-pg, --prompt-gen <P,G;P,G...>]
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
-          [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>]
+          [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4|kvarn>]
           [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]

@@ -38,7 +38,7 @@ KV 架构区分：
 
 | 粒度 | 含义 | 当前合同 |
 |---|---|---|
-| allocation granularity | pool 一次取得或释放多少 token payload | 每个 growing pool 为 `P=64` |
+| allocation granularity | pool 一次取得或释放多少 token payload | KVarN uses `P=128`; standard growing pools use `P=64` |
 | valid-frontier granularity | consumer 可以读取到哪个 logical position | 1 token |
 | reusable-state granularity | 哪个 frontier 具有完整模型 continuation | target-defined checkpoint |
 
@@ -78,7 +78,7 @@ MTP 与 DFlash 在一个 Engine 内互斥，因此当前最多有两个 growing 
 | MTP | MTP persistent K/V 与其 code/scale planes | MTP KV frontier |
 | DFlash Full | DFlash persistent full-context K/V | DFlash context frontier |
 
-Main Text 与 MTP 使用 Engine 选择的 BF16、INT8-G64、FP8-E4M3FN-row256、NVFP4-G16 或 K8V4
+Main Text 与 MTP 使用 Engine 选择的 BF16、INT8-G64、FP8-E4M3FN-row256、NVFP4-G16、K8V4 或 KVarN K4V2-G128
 KV profile；DFlash Full 使用自己的 BF16 profile。`BFloat16` 名称下的物理 layout 为 BF16 K、FP16 V，
 写入端将 BF16 V 一次转换为 FP16。K8V4 是封闭的非对称 profile，不是运行时 bit-width 组合：K 固定为
 FP8-E4M3FN-row256，V 固定为 NVFP4-G16。
@@ -87,13 +87,133 @@ FP8-E4M3FN-row256，V 固定为 NVFP4-G16。
 layer 展开该 schema 并确定 plane ordinal。Common pool implementation 仍只接收已展开的
 `KVPageGeometry`、plane inventory 和 capacity，不解释 storage mode。
 
+### KVarN Record And Tail Semantics
+
+KVarN uses one 128-token physical page per quantization group and one joint record plane per
+attention layer. Each KV head's record has 26,880 payload bytes and the same 256-aligned stride.
+Field offsets follow Huawei's `kvarn_k4v2_g128` preset; NInfer omits its allocator's trailing
+power-of-two padding. `include/ninfer/ops/kvarn.h` fixes the field layout. Logical ownership,
+copy-on-write, Host transfers, and reservations operate on the whole 128-token group, never on
+independently owned halves. Other storage profiles and DFlash Full retain 64-token pages.
+
+Each execution row has one permanent BF16 sink slot for the first 128 tokens and two dynamic
+BF16 tail slots. Concurrent staging CTAs atomically claim one common slot per logical group.
+Sink/tail values and their logical-group markers belong to the continuation StateImage.
+
+Attention uses represented compressed history plus unquantized current-step K/V, with a causal
+mask for each query. Fresh prefill therefore attends to unquantized current input, not to records
+encoded using later tokens in that same chunk. Large chunks read complete current groups directly
+from their rotated inputs; partial groups remain in the tail. Final-query MTP prefill follows the
+same rule even though it evaluates only the last query.
+
+Ordinary calls encode completed non-sink groups after attention. Speculative calls retain their
+current groups unquantized until final output publication; licensing alone does not encode them.
+Settlement encodes only complete groups in the published prefix, then retires their markers.
+This includes MTP alignment: a stop can shorten the licensed block before its final frontier is
+known. Rejected suffixes never enter committed records and remain
+overwritable in the tail. Encoding immediately after commitment is equivalent, for the next
+attention call, to Huawei's flush of previously committed groups before the next step.
+
+Settlement batches up to sixteen disjoint layers at one finalized frontier without device
+scratch. One encode launch completes before one fused marker/restore launch; each restore CTA
+owns a layer's markers and all its heads. Rows and Main/MTP pools remain separately ordered.
+This removes per-layer launch sequences without moving encoding before final publication.
+
+The reference policy is step-dependent: a speculative block can retain unquantized values longer
+than token-at-a-time decoding. Exact ordinary-versus-speculative token identity is not a KVarN
+contract. Prefix-state ownership and acceptance still preserve the exact selected execution state.
+
+Native decode retains scalar/four/eight-column schedules and per-query split partitions. Encoded
+G128 records are staged in 64-token slices to bound shared-memory use; this does not change the
+128-token quantization group or its metadata. Sinkhorn staging keeps the represented BF16 input
+in shared memory and performs normalization in FP32. Inactive query groups still participate in
+shared K/V staging and CTA barriers.
+
+H24/KV4 packed decode dispatches up to sixteen queries together using eight-column CTA groups
+and one reduction launch. The groups do not share their staged K/V with each other; every query
+retains its own split partition and causal mask.
+
+#### Paper And Reference Alignment
+
+The mathematical reference is [KVarN, arXiv:2606.03458v1](https://arxiv.org/html/2606.03458v1),
+especially Section 3.3 and Appendices A, D, and H. The implemented profile follows Huawei's
+[released K4V2-G128 preset](https://github.com/huawei-csl/KVarN/blob/7586257f1c632e63187bfacbbe21ccb51540f7b3/vllm/model_executor/layers/quantization/kvarn/config.py),
+not the paper's main experimental precision profile.
+
+- Orthonormal channel-wise Sylvester-Hadamard rotation uses `H / sqrt(256)`. Q and K are rotated
+  after RoPE; V is rotated on storage and the attention result is rotated back. There is no
+  token-axis rotation.
+- K is balanced as `[D,G]` and quantized per channel; V is balanced as `[G,D]` and quantized per
+  token. Both use alternating column/row log-scale updates, eight passes, standard-deviation
+  clamps `[1e-3,1e3]`, log-scale clamps `[-0.3,10]`, and best-state selection with `<=`.
+- Asymmetric nearest-even RTN uses K4/V2 codes. Absorbing one balancing scale into the RTN scale
+  and offset gives `(code * absorbed_scale + absorbed_offset) * other_scale`, with FP16 metadata.
+  Code bit ordering and payload offsets match the released preset; only trailing record padding
+  is smaller.
+- Appendix H writes its imbalance objective using variance spreads, whereas Huawei's
+  [PyTorch reference](https://github.com/huawei-csl/KVarN/blob/7586257f1c632e63187bfacbbe21ccb51540f7b3/vllm/model_executor/layers/quantization/kvarn/sinkhorn.py)
+  and Triton implementation use standard-deviation spreads. These objectives need not select the
+  same best iteration. NInfer follows the released implementation; it is not a literal execution
+  of the paper's pseudocode.
+- The paper's main experiments use K2/V2, group 128, and FP8 scales with an FP16 zero point in its
+  memory-accounting description. NInfer uses K4/V2, group 128, and FP16 scales/offsets. Its payload
+  is 3.28125 bits per K/V element, before sink/tail overhead.
+  The paper's roughly 2.3-bit storage and quality results do not describe this profile.
+- NInfer retains rotated Q/K/V and sink/tail values in BF16 with FP32 transform/normalization
+  arithmetic; the released backend uses an FP16 rotation/tail path. This is an implementation
+  precision difference, so encoding identical unrotated inputs need not produce byte-identical
+  records across engines. The 128-token permanent sink matches the paper's usual sink size.
+- Flush timing follows the reference's unquantized-current-step/committed-history rule above.
+  Native arithmetic is qualified against an independent mathematical oracle, not the reference's
+  private reduction tree or intermediate casts. Bit-identical model outputs across engines are
+  not claimed.
+
+Qualification uses an independent FP64 balancing/RTN oracle on represented BF16 tiles, represented
+stored-code decoding checks, an independent Hadamard oracle, and represented-cache attention
+oracles for H24/KV4 and H16/KV2. This checks the implementation, not reproduction of the paper's
+reasoning/quality benchmark results or stochastic tool-call reliability.
+
+#### Execution Regression
+
+Use the existing `ninfer_qwen3_6_27b_mtp_greedy_parity_real_test` with
+`NINFER_MTP_GREEDY_PARITY_WEIGHTS` set to an explicit artifact path. `--kvarn-repeatability` selects KVarN;
+its default is 8,192 output tokens, two fresh executions per case/row/depth, and a 1,024-token prefill
+chunk. `--output-tokens 128..16384` supports focused cases. A short smoke is not the long-decode
+gate: the reproduced identifier-prompt failure was at output token 3,888.
+
+| Case | Arguments after `--kvarn-repeatability` | Protected behavior |
+|---|---|---|
+| Long decode | `--sample 1 --output-tokens 8192` | Same-backend repeatability across packed, 4K, and 8K transitions |
+| Mixed rows | `--sample 1 --output-tokens 512 --concurrency 8` | Unequal prompt/output lengths, compact batches, and row completion |
+| Prefix restore | `--sample 1 --output-tokens 512 --concurrency 2 --prefix-reuse` | One-token prewarm, exact reused frontier, and resumed greedy output |
+| Eager/full head | `--sample 1 --output-tokens 8192 --draft-tokens 5 --no-cuda-graph --full-proposal-head --prefill-chunk 128` | Eager execution, full proposal head, and a different prefill chunk |
+| Long-context transition | `--sample 5 --output-tokens 512 --corpus /path/to/corpus.ids` | All depths crossing 122,880 visible keys |
+| Long resident context | `--sample 6` or `--sample 7`, with `--output-tokens 512 --draft-tokens 3 --corpus /path/to/corpus.ids` | MTP3 at 192K and about 240K prompt tokens |
+
+Samples 0/1 are thinking-code/non-thinking-identifier chats; sample 2 is a 2,110-token raw prompt.
+With a whitespace-separated token-ID corpus, samples 3..7 use 8,190, 32,799, 122,879, 196,607,
+and 245,743 prompt tokens. `--draft-tokens 1..5` selects one MTP depth; otherwise all depths
+run. `--concurrency 1..8` varies row prompts and output budgets and asserts that a multi-row case
+actually executed a compact batch. Prefix cases assert the exact reused token count. Graph-enabled
+Engine cases use the startup/replay route; `active_captures_completed` alone cannot prove coverage
+because it excludes startup capture. Op regressions explicitly capture and replay the kernels.
+
+The Op suite covers all 128 group offsets, widths 1..6 and selected widths 8/16, valid/accepted
+prefix lengths including zero, rejected-group replacement, and split-policy transitions. FP64
+oracles independently check represented history and raw-current-chunk attention without private
+intermediate rounding. Supplementary append/cached and Graph comparisons use the same represented
+cache rather than token-at-a-time compression.
+Eight-row testing also reproduced a W8 vocabulary-head mismatch above 33 columns. The full
+48-column verification range now retains the ordinary eight-way K-reduction profile; the
+48-column kernel stages activations in two halves without reassociating any column's arithmetic.
+
 ### 3.2 Main capacity
 
 设：
 
 - \(S\)：单条 sequence 的 `max_context`；
 - \(C\)：`max_concurrency`；
-- \(P=64\)：Main page size；
+- \(P\)：Main page size, 128 for KVarN and 64 for standard storage；
 - \(L=\lceil S/P\rceil\)：单 address space 的 logical page capacity；
 - \(M\)：Main pool 的 physical page-group count。
 
@@ -222,7 +342,8 @@ fragmentation，也不需要 Device compaction。
 
 ### 4.3 Closed Device plane orders
 
-所有 registered growing pools 使用 \(P=64\)，并选择两种 closed orders 之一。
+KVarN growing pools use \(P=128\); other registered growing pools use \(P=64\).
+Both use one of the following closed plane orders.
 
 Main Text 与 MTP 使用 page-major：
 
@@ -277,6 +398,7 @@ D256 Main/MTP profile 的单 token/head 物理 payload 为：
 | FP8-E4M3FN-row256 | 256 B + 2 B | 256 B + 2 B | 516 B |
 | NVFP4-G16 | 128 B + 16 B | 128 B + 16 B | 288 B |
 | K8V4 | 256 B + 2 B | 128 B + 16 B | 402 B |
+| KVarN K4V2-G128 | Joint record | Joint record | 210 B |
 
 K/V 的 code 和 scale planes 具有各自的 dtype、leading extent 和 group size；它们仍共享 page-group
 identity、frontier 和 lifetime。Capacity curve、Device/Host replica、continuation transfer 和 memory
@@ -303,9 +425,9 @@ PageBytes=\sum_{plane} PlaneBytesPerToken\cdot P
 Startup physical bytes 由各 plane slab 的完整 span 与 alignment 得到。不同 pools 的 `PageBytes` 可以不同，
 但一个 pool 内的所有 page groups 等价。
 
-`P=64` 同时满足当前 32/64-key Attention tiles、128-token aligned prefill chunks、有限 block-table
-metadata 和 bounded tail slack。Prefix hit granularity不参与 page-size 选择。改变 page size、grouping
-或 closed plane order 都是架构变更。
+Standard storage uses `P=64`; KVarN uses `P=128` so one quantization group has one ownership unit.
+Both fit the current 32/64-key attention tiles and 128-token aligned prefill chunks. Prefix-hit
+granularity does not select the physical page size.
 
 ---
 

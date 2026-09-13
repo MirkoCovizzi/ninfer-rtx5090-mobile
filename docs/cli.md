@@ -212,7 +212,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
-| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4\|kvarn` | KV-cache storage (`kvarn` is Huawei K4V2-G128) | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -259,7 +259,8 @@ Artifact identity selects the weight profile;
 `--kv-dtype` selects runtime KV storage. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
-the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU
+the storage profile's page size: 128 tokens for KVarN, 64 otherwise. `--kv-capacity auto` loads the
+selected weights, measures the remaining GPU
 memory, and directly chooses the largest legal page capacity for the complete enabled runtime
 layout. This includes the selected speculative backend, fixed sequence state, unified workspace,
 and CUDA Graph allowance, while leaving the default 1 GiB automatic headroom

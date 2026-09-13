@@ -2,6 +2,8 @@
 
 #include "core/layout.h"
 #include "core/paged_kv_cache.h"
+#include "ninfer/ops/kvarn.h"
+#include "ninfer/types.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +13,10 @@ namespace ninfer::targets::qwen3_6 {
 
 inline constexpr std::int32_t kKvInt8QuantGroup = 64;
 inline constexpr std::int32_t kKvFp8QuantGroup  = 256;
+
+inline constexpr std::uint32_t kv_page_tokens(KvCacheStorage storage) noexcept {
+    return storage == KvCacheStorage::KvarnK4V2Group128 ? ops::kKvarnGroup : kPagedKVPageSize;
+}
 
 struct DecoderStateSpec {
     std::uint32_t full_attention_layers     = 0;
@@ -28,12 +34,19 @@ struct DecoderStateSpec {
 struct PagedKVCacheLayout {
     DeviceKVPagePoolLayout pages;
     KVExecutionTableLayout execution_tables;
+    TensorRegion kvarn_tail_k;
+    TensorRegion kvarn_tail_v;
+    TensorRegion kvarn_tail_logical_pages;
     std::uint32_t layers      = 0;
     std::uint32_t max_context = 0;
     std::int32_t kv_heads     = 0;
-    PagedKVStorageLayout layer_storage;
+    // KVarN owns joint record planes rather than separate K/V vector planes.
+    std::optional<PagedKVStorageLayout> layer_storage;
 
-    [[nodiscard]] std::size_t payload_bytes() const noexcept { return pages.payload_bytes(); }
+    [[nodiscard]] std::size_t payload_bytes() const noexcept {
+        return pages.payload_bytes() + kvarn_tail_k.region.bytes + kvarn_tail_v.region.bytes +
+               kvarn_tail_logical_pages.region.bytes;
+    }
 };
 
 class PagedKVCache;
@@ -46,13 +59,16 @@ public:
 
     [[nodiscard]] std::uint32_t max_context() const noexcept;
     [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer) const;
+    [[nodiscard]] ops::KvarnPagedLayerView kvarn_layer_view(std::uint32_t layer) const;
 
 private:
     friend class PagedKVCache;
-    PagedKVCacheView(const PagedKVCache& cache, Tensor block_table) noexcept;
+    PagedKVCacheView(const PagedKVCache& cache, Tensor block_table,
+                     std::int32_t table_row) noexcept;
 
     const PagedKVCache* cache_ = nullptr;
     Tensor block_table_;
+    std::int32_t table_row_ = -1;
 };
 
 class PagedKVCache {
@@ -68,6 +84,10 @@ public:
 
     [[nodiscard]] std::uint32_t layers() const noexcept { return layers_; }
 
+    [[nodiscard]] KvCacheStorage storage() const noexcept {
+        return layer_storage_ ? layer_storage_->storage : KvCacheStorage::KvarnK4V2Group128;
+    }
+
     [[nodiscard]] DeviceKVPagePool& page_pool() noexcept { return pages_; }
 
     [[nodiscard]] const DeviceKVPagePool& page_pool() const noexcept { return pages_; }
@@ -81,17 +101,24 @@ public:
     [[nodiscard]] PagedKVCacheView execution_view(const KVExecutionRowLease& row) const;
 
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
+    [[nodiscard]] ops::KvarnPagedBatchLayerView kvarn_batch_layer_view(std::uint32_t layer) const;
+    void reset_kvarn_tail_row(std::int32_t table_row, cudaStream_t stream = nullptr) const;
 
 private:
     friend class PagedKVCacheView;
     [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer, Tensor block_table) const;
+    [[nodiscard]] ops::KvarnPagedLayerView kvarn_layer_view(std::uint32_t layer, Tensor block_table,
+                                                            std::int32_t table_row) const;
 
     DeviceKVPagePool pages_;
     KVExecutionTablePool execution_tables_;
     std::uint32_t layers_      = 0;
     std::uint32_t max_context_ = 0;
     std::int32_t kv_heads_     = 0;
-    PagedKVStorageLayout layer_storage_;
+    Tensor kvarn_tail_k_;
+    Tensor kvarn_tail_v_;
+    Tensor kvarn_tail_logical_pages_;
+    std::optional<PagedKVStorageLayout> layer_storage_;
 };
 
 struct DecoderStateLayout {

@@ -8,8 +8,8 @@
 
 namespace ninfer::test {
 
-// Exercise the same resource transition for DFlash's Full KV and DFlash2's cyclic-only state.
-inline void speculative_page_boundary(Engine& engine) {
+// Exercise speculative publication and restoration across a physical KV boundary.
+inline void speculative_page_boundary(Engine& engine, std::uint32_t prefix_tokens = 63) {
     const auto check = [](bool condition, const char* message) {
         if (!condition) { throw std::runtime_error(message); }
     };
@@ -23,15 +23,15 @@ inline void speculative_page_boundary(Engine& engine) {
     };
 
     auto prompt = engine.tokenize_text("Count from one to twenty: one, two, three,");
-    check(prompt.size() <= 63, "page-boundary prompt exceeds its fixed prefix");
-    prompt.insert(prompt.begin(), 63 - prompt.size(), 198);
+    check(prompt.size() <= prefix_tokens, "page-boundary prompt exceeds its fixed prefix");
+    prompt.insert(prompt.begin(), prefix_tokens - prompt.size(), 198);
     const auto reference = engine.generate(engine.prepare_tokens(prompt), request(false));
     check(reference.generated_token_ids.size() == 16 &&
               reference.generated_token_ids[0] != reference.generated_token_ids[1],
           "page-boundary fixture must expose a distinct second output token");
 
-    // Begin samples one token at E=63. Verify then maps past 64, but this stop commits only
-    // one target column, ending at E=64. A full output budget keeps the verify window open.
+    // The stop commits one target column despite the wider verification window. In the G128
+    // case E=254, verification crosses 256 while publication retains the partial group at 255.
     for (const bool reuse : {false, true}) {
         auto stopped_options = request(reuse);
         stopped_options.stop.token_ids.push_back(reference.generated_token_ids[1]);
@@ -50,7 +50,7 @@ inline void speculative_page_boundary(Engine& engine) {
     followup.push_back(198);
     const auto reused = engine.generate(engine.prepare_tokens(followup), request(true));
     const auto fresh  = engine.generate(engine.prepare_tokens(followup), request(false));
-    check(reused.reused_prompt_tokens == 64,
+    check(reused.reused_prompt_tokens == prefix_tokens + 1,
           "page-boundary terminal did not retain its exact committed frontier");
     // The resource oracle is the exact retained frontier and successful subsequent execution.
     // Reuse and full prefill have different floating-point paths, so long generated text is not
