@@ -1490,6 +1490,17 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         std::move(cache_hints), message_count, message_boundaries, rendered_markers,
         cache_boundaries, result.vision_items, engine_tool_marker_index, leading_boundary,
         checked_token_count(result.token_ids.size()));
+    // Capture eligibility must not select a different arithmetic/quantization schedule. Execute
+    // every declared frontier even when caching is disabled or admission declines the capture.
+    auto& frontiers = result.identity.rewrite_execution_frontiers;
+    if (result.identity.rewrite_checkpoint) {
+        frontiers.push_back(result.identity.rewrite_checkpoint->frontier);
+    }
+    for (const auto& opportunity : result.context_cache.opportunities) {
+        frontiers.push_back(opportunity.frontier);
+    }
+    std::sort(frontiers.begin(), frontiers.end());
+    frontiers.erase(std::unique(frontiers.begin(), frontiers.end()), frontiers.end());
     result.starts_in_reasoning =
         options.continuation == PromptContinuationMode::NewAssistantTurn && options.enable_thinking;
     result.prepare.seconds = std::chrono::duration<double>(Clock::now() - start).count();

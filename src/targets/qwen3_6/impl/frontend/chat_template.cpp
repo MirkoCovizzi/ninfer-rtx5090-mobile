@@ -587,6 +587,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         }
 
         // assistant
+        add_rewrite_execution_boundary();
         if (continue_final_assistant && i + 1U == messages.size()) {
             const std::size_t generation_begin = rendered.size();
             rewrite_checkpoint                 = RewriteCheckpointByteSpec{
@@ -649,6 +650,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         // opener; placing it after the deterministic prologue makes the complete history
         // unrecoverable for the branch case merely to save a handful of prompt tokens.
         const std::size_t generation_begin = rendered.size();
+        add_rewrite_execution_boundary();
         if (preserve_thinking) {
             rewrite_checkpoint = RewriteCheckpointByteSpec{
                 .kind = RewriteCheckpointKind::ResponseReplay, .offset = generation_begin};
