@@ -1080,8 +1080,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             throw std::invalid_argument("multimodal prefill requires a Vision session");
         }
         rope_delta_ = multimodal->rope_delta;
-    } else if (text_kv_base_ == 0) {
-        rope_delta_ = 0;
+    } else {
+        // A reused media prefix can leave only text to prefill, but its RoPE offset still applies.
+        rope_delta_ = text_prefill != nullptr ? text_prefill->rope_delta : 0;
     }
     ops::set_i32_scalar(io_.rope_delta, rope_delta_, s);
 
@@ -1318,12 +1319,13 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
 }
 
 PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std::uint32_t begin,
-                                              std::uint32_t nominal_length, bool finalize_at_end) {
+                                              std::uint32_t nominal_length, bool finalize_at_end,
+                                              std::int32_t rope_delta) {
     if (begin >= full_ids.size() || nominal_length == 0 ||
         nominal_length > full_ids.size() - begin) {
         throw std::invalid_argument("text prefill chunk is outside the prompt");
     }
-    const TextPrefill text_prefill{full_ids, begin};
+    const TextPrefill text_prefill{full_ids, begin, rope_delta};
     NullTap tap;
     return prefill_impl(full_ids.subspan(begin, nominal_length), &text_prefill, nullptr, tap,
                         finalize_at_end);
@@ -1331,12 +1333,12 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
 
 PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std::uint32_t begin,
                                               std::uint32_t nominal_length, bool finalize_at_end,
-                                              DFlashFeatureSink& sink) {
+                                              std::int32_t rope_delta, DFlashFeatureSink& sink) {
     if (begin >= full_ids.size() || nominal_length == 0 ||
         nominal_length > full_ids.size() - begin) {
         throw std::invalid_argument("text prefill chunk is outside the prompt");
     }
-    const TextPrefill text_prefill{full_ids, begin};
+    const TextPrefill text_prefill{full_ids, begin, rope_delta};
     return prefill_impl(full_ids.subspan(begin, nominal_length), &text_prefill, nullptr, sink,
                         finalize_at_end);
 }

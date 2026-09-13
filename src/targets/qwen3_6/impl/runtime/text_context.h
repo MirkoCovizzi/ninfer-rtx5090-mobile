@@ -195,11 +195,10 @@ public:
     [[nodiscard]] PrefillChunkResult prefill_chunk(std::span<const int> full_ids,
                                                    std::uint32_t begin,
                                                    std::uint32_t nominal_length,
-                                                   bool finalize_at_end);
-    [[nodiscard]] PrefillChunkResult prefill_chunk(std::span<const int> full_ids,
-                                                   std::uint32_t begin,
-                                                   std::uint32_t nominal_length,
-                                                   bool finalize_at_end, DFlashFeatureSink& sink);
+                                                   bool finalize_at_end, std::int32_t rope_delta);
+    [[nodiscard]] PrefillChunkResult
+    prefill_chunk(std::span<const int> full_ids, std::uint32_t begin, std::uint32_t nominal_length,
+                  bool finalize_at_end, std::int32_t rope_delta, DFlashFeatureSink& sink);
     [[nodiscard]] PrefillChunkResult
     prefill_chunk(const qwen3_6::PreparedPromptData& input, std::uint32_t begin,
                   std::uint32_t nominal_length, VisionPrefillSession& vision, bool finalize_at_end);
@@ -285,7 +284,8 @@ private:
 
     struct TextPrefill {
         std::span<const int> token_ids;
-        std::uint32_t begin = 0;
+        std::uint32_t begin     = 0;
+        std::int32_t rope_delta = 0;
     };
 
     template <class Tap>

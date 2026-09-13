@@ -380,8 +380,10 @@ order.
   the correct MRoPE position.
 
 The Text RoPE kernel consumes these positions during multimodal prefill and uses the saved
-`rope_delta` during decode. This is why Vision can disappear after prefill while Text positions
-remain consistent.
+`rope_delta` during decode. Text-only suffix prefill after a reused media prefix, and forced-token
+prefill after that prefix, also receive this offset explicitly from the sequence. The absence of
+a Vision execution session does not imply a zero offset. This is why Vision can disappear after
+prefill while Text positions remain consistent.
 
 ## 12. Precision and oracle boundaries
 

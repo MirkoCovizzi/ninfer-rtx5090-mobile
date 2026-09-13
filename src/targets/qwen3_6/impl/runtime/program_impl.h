@@ -1112,7 +1112,7 @@ std::vector<float> ProgramImplCore::causal_score(PreparedPromptData&& prompt,
             mark_workspace_usage(workspace_plan.text_prefill);
             const schedule::PrefillChunkResult result = schedule::prefill_text_chunk(
                 schedule_state, std::span<const TokenId>(prompt.token_ids), nominal, std::nullopt,
-                false);
+                false, 0);
             if (result.finalized || result.processed_tokens == 0 ||
                 result.processed_tokens > nominal) {
                 throw std::logic_error("causal score Prefill made invalid progress");
@@ -8967,8 +8967,9 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
                 if (is_masked_draft_backend(speculative_backend)) {
                     mark_workspace_usage(workspace_plan.dflash_context);
                 }
-                const schedule::PrefillChunkResult result = schedule::prefill_text_chunk(
-                    schedule_state, sequence.ledger, count, std::nullopt, false);
+                const schedule::PrefillChunkResult result =
+                    schedule::prefill_text_chunk(schedule_state, sequence.ledger, count,
+                                                 std::nullopt, false, sequence.rope_delta);
                 if (result.finalized || result.processed_tokens == 0 ||
                     result.processed_tokens > count) {
                     throw std::logic_error("forced-token prefill made invalid progress");
@@ -11556,7 +11557,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 } else {
                     result = schedule::prefill_text_chunk(
                         schedule_state, std::span<const TokenId>(staged.prompt.token_ids),
-                        remaining, split_frontier, final_candidate);
+                        remaining, split_frontier, final_candidate, sequence.rope_delta);
                 }
                 timing.include(result.timing);
                 timing.resume_post();
