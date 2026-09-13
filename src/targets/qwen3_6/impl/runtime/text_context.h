@@ -184,6 +184,8 @@ public:
     void set_linear_state_slots(std::int32_t source_slot, std::int32_t destination_slot);
     void set_gdn_state_action(GdnStateAction action, const GdnReplayRecords* replay_records);
 
+    void set_kvarn_provisional(bool provisional) noexcept { kvarn_provisional_ = provisional; }
+
     [[nodiscard]] const Weight* proposal_head() const noexcept { return proposal_head_; }
 
     [[nodiscard]] const std::int32_t* proposal_head_ids() const noexcept {
@@ -195,11 +197,10 @@ public:
     [[nodiscard]] PrefillChunkResult prefill_chunk(std::span<const int> full_ids,
                                                    std::uint32_t begin,
                                                    std::uint32_t nominal_length,
-                                                   bool finalize_at_end);
-    [[nodiscard]] PrefillChunkResult prefill_chunk(std::span<const int> full_ids,
-                                                   std::uint32_t begin,
-                                                   std::uint32_t nominal_length,
-                                                   bool finalize_at_end, DFlashFeatureSink& sink);
+                                                   bool finalize_at_end, std::int32_t rope_delta);
+    [[nodiscard]] PrefillChunkResult
+    prefill_chunk(std::span<const int> full_ids, std::uint32_t begin, std::uint32_t nominal_length,
+                  bool finalize_at_end, std::int32_t rope_delta, DFlashFeatureSink& sink);
     [[nodiscard]] PrefillChunkResult
     prefill_chunk(const qwen3_6::PreparedPromptData& input, std::uint32_t begin,
                   std::uint32_t nominal_length, VisionPrefillSession& vision, bool finalize_at_end);
@@ -285,7 +286,8 @@ private:
 
     struct TextPrefill {
         std::span<const int> token_ids;
-        std::uint32_t begin = 0;
+        std::uint32_t begin     = 0;
+        std::int32_t rope_delta = 0;
     };
 
     template <class Tap>
@@ -322,6 +324,7 @@ private:
     std::int64_t prefill_split_frontier_      = -1;
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
+    bool kvarn_provisional_                   = false;
 
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;

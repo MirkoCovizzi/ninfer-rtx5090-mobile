@@ -15,6 +15,7 @@
 #include "ninfer/ops/gdn_gating.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/kvarn_attention.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_pair.h"
@@ -396,14 +397,28 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
         Tensor v_batch        = v.view({kCfg.head_dim, kCfg.n_kv, width, active_sequence_batch_});
         Tensor a_batch        = a.view({kCfg.head_dim, kCfg.n_q, width, active_sequence_batch_});
         Tensor position_batch = positions.view({width, active_sequence_batch_});
-        ops::causal_softmax_attention(
-            q_batch, k_batch, v_batch, position_batch, *active_valid_columns_,
-            *active_backend_kv_table_rows_, {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
-            batch_mtp_kv_->batch_layer_view(0), envelope, work_, a_batch, s);
+        if (batch_mtp_kv_->storage() == KvCacheStorage::KvarnK4V2Group128) {
+            ops::kvarn_attention(q_batch, k_batch, v_batch, position_batch, *active_valid_columns_,
+                                 *active_backend_kv_table_rows_, kAttnScale,
+                                 batch_mtp_kv_->kvarn_batch_layer_view(0), kvarn_provisional_,
+                                 envelope, work_, a_batch, s);
+        } else {
+            ops::causal_softmax_attention(
+                q_batch, k_batch, v_batch, position_batch, *active_valid_columns_,
+                *active_backend_kv_table_rows_, {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
+                batch_mtp_kv_->batch_layer_view(0), envelope, work_, a_batch, s);
+        }
     } else {
-        ops::causal_softmax_attention(qn, kn, v, positions, Tensor{}, io_.backend_kv_table_row,
-                                      {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
-                                      batch_mtp_kv_->batch_layer_view(0), envelope, work_, a, s);
+        if (batch_mtp_kv_->storage() == KvCacheStorage::KvarnK4V2Group128) {
+            ops::kvarn_attention(qn, kn, v, positions, Tensor{}, io_.backend_kv_table_row,
+                                 kAttnScale, batch_mtp_kv_->kvarn_batch_layer_view(0),
+                                 kvarn_provisional_, envelope, work_, a, s);
+        } else {
+            ops::causal_softmax_attention(qn, kn, v, positions, Tensor{}, io_.backend_kv_table_row,
+                                          {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
+                                          batch_mtp_kv_->batch_layer_view(0), envelope, work_, a,
+                                          s);
+        }
     }
     ops::sigmoid_mul(gate, a, s);
 
@@ -474,9 +489,17 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
     auto scratch_scope = work_.scope();
     Tensor x_last;
     Tensor ah_last;
+    Tensor final_key;
+    Tensor final_value;
+    const bool kvarn_final =
+        final_chunk && batch_mtp_kv_->storage() == KvCacheStorage::KvarnK4V2Group128;
     if (final_chunk) {
         x_last  = work_.alloc(DType::BF16, {kCfg.hidden, 1});
         ah_last = work_.alloc(DType::BF16, {kCfg.hidden, 1});
+        if (kvarn_final) {
+            final_key   = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_kv, T});
+            final_value = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_kv, T});
+        }
     }
 
     {
@@ -486,14 +509,23 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         mtp_forward_stem(ids, hidden, input_embeddings, x, ah);
 
         Tensor k_flat = work_.alloc(DType::BF16, {kCfg.kv_size, T});
-        Tensor v_flat = work_.alloc(DType::BF16, {kCfg.kv_size, T});
+        Tensor v_flat = kvarn_final ? final_value.view({kCfg.kv_size, T})
+                                    : work_.alloc(DType::BF16, {kCfg.kv_size, T});
         Variant::mtp_kv_projection(ah, mtp_.payload->attention, k_flat, v_flat, work_, s);
-        Tensor k  = k_flat.view({kCfg.head_dim, kCfg.n_kv, T});
-        Tensor v  = v_flat.view({kCfg.head_dim, kCfg.n_kv, T});
-        Tensor kn = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_kv, T});
+        Tensor k = k_flat.view({kCfg.head_dim, kCfg.n_kv, T});
+        Tensor v = v_flat.view({kCfg.head_dim, kCfg.n_kv, T});
+        Tensor kn =
+            kvarn_final ? final_key : work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_kv, T});
         ops::rmsnorm(k, *mtp_.k_norm, kCfg.rms_eps, true, kn, s);
         ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, kn, s);
-        ops::kv_cache_append(kn, v, positions, mtp_kv_.layer_view(0), s);
+        if (batch_mtp_kv_->storage() == KvCacheStorage::KvarnK4V2Group128) {
+            if (!final_chunk) {
+                ops::kvarn_kv_append(kn, v, positions, Tensor{}, io_.backend_kv_table_row,
+                                     batch_mtp_kv_->kvarn_batch_layer_view(0), false, s);
+            }
+        } else {
+            ops::kv_cache_append(kn, v, positions, mtp_kv_.layer_view(0), s);
+        }
 
         if (final_chunk) {
             const std::size_t column_bytes =
@@ -535,9 +567,15 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         ops::rope(last_rope_position, kCfg.rotary_dim, kCfg.rope_theta, qn, s);
 
         Tensor a = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_q, 1});
-        ops::causal_softmax_attention_cached(qn, last_position,
-                                             {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
-                                             mtp_kv_.layer_view(0), envelope, work_, a, s);
+        if (batch_mtp_kv_->storage() == KvCacheStorage::KvarnK4V2Group128) {
+            ops::kvarn_attention(
+                qn, final_key, final_value, positions, Tensor{}, io_.backend_kv_table_row,
+                kAttnScale, batch_mtp_kv_->kvarn_batch_layer_view(0), false, envelope, work_, a, s);
+        } else {
+            ops::causal_softmax_attention_cached(qn, last_position,
+                                                 {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
+                                                 mtp_kv_.layer_view(0), envelope, work_, a, s);
+        }
         ops::sigmoid_mul(gate, a, s);
 
         Tensor o = work_.alloc(DType::BF16, {kCfg.hidden, 1});
@@ -730,6 +768,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         ScopedValue<const Tensor*> valid_binding(active_valid_columns_, &valid_columns);
         ScopedValue<std::int32_t> batch_binding(active_sequence_batch_, batch);
         ScopedValue<std::int32_t> width_binding(active_sequence_width_, width);
+        ScopedValue<bool> kvarn_binding(kvarn_provisional_, true);
 
         Tensor x        = work_.alloc(DType::BF16, {kCfg.hidden, columns});
         Tensor flat_ids = ids.view({columns});
@@ -861,15 +900,28 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
         Tensor a_batch        = a.view({kCfg.head_dim, kCfg.n_q, width, active_sequence_batch_});
         Tensor position_batch = cache_positions.view({width, active_sequence_batch_});
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
-        ops::causal_softmax_attention(q_batch, k_batch, v_batch, position_batch, valid,
-                                      kv_table_rows, {kCfg.head_dim, kCfg.n_q, kCfg.n_kv},
-                                      kAttnScale, batch_text_kv_->batch_layer_view(fidx),
-                                      *active_causal_attention_envelope_, work_, a_batch, s);
+        if (batch_text_kv_->storage() == KvCacheStorage::KvarnK4V2Group128) {
+            ops::kvarn_attention(q_batch, k_batch, v_batch, position_batch, valid, kv_table_rows,
+                                 kAttnScale, batch_text_kv_->kvarn_batch_layer_view(fidx),
+                                 kvarn_provisional_, *active_causal_attention_envelope_, work_,
+                                 a_batch, s);
+        } else {
+            ops::causal_softmax_attention(q_batch, k_batch, v_batch, position_batch, valid,
+                                          kv_table_rows, {kCfg.head_dim, kCfg.n_q, kCfg.n_kv},
+                                          kAttnScale, batch_text_kv_->batch_layer_view(fidx),
+                                          *active_causal_attention_envelope_, work_, a_batch, s);
+        }
     } else {
-        ops::causal_softmax_attention(qn, kn, v, cache_positions, Tensor{}, kv_table_rows,
-                                      {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
-                                      batch_text_kv_->batch_layer_view(fidx),
-                                      *active_causal_attention_envelope_, work_, a, s);
+        if (batch_text_kv_->storage() == KvCacheStorage::KvarnK4V2Group128) {
+            ops::kvarn_attention(qn, kn, v, cache_positions, Tensor{}, kv_table_rows, kAttnScale,
+                                 batch_text_kv_->kvarn_batch_layer_view(fidx), kvarn_provisional_,
+                                 *active_causal_attention_envelope_, work_, a, s);
+        } else {
+            ops::causal_softmax_attention(qn, kn, v, cache_positions, Tensor{}, kv_table_rows,
+                                          {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
+                                          batch_text_kv_->batch_layer_view(fidx),
+                                          *active_causal_attention_envelope_, work_, a, s);
+        }
     }
     ops::sigmoid_mul(gate, a, s);
 
@@ -1080,8 +1132,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             throw std::invalid_argument("multimodal prefill requires a Vision session");
         }
         rope_delta_ = multimodal->rope_delta;
-    } else if (text_kv_base_ == 0) {
-        rope_delta_ = 0;
+    } else {
+        // A reused media prefix can leave only text to prefill, but its RoPE offset still applies.
+        rope_delta_ = text_prefill != nullptr ? text_prefill->rope_delta : 0;
     }
     ops::set_i32_scalar(io_.rope_delta, rope_delta_, s);
 
@@ -1265,6 +1318,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
 
                     Tensor ar_position = io_.mtp->position.slice(0, 0, 1);
                     ops::set_i32_scalar(ar_position, base_i + T, s);
+                    set_kvarn_provisional(true);
                     for (int i = 1; i < static_cast<int>(mtp_proposal_extent_); ++i) {
                         Tensor prev_token     = io_.mtp->draft_tokens.slice(0, i - 1, 1);
                         Tensor next_token     = io_.mtp->draft_tokens.slice(0, i, 1);
@@ -1318,12 +1372,13 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
 }
 
 PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std::uint32_t begin,
-                                              std::uint32_t nominal_length, bool finalize_at_end) {
+                                              std::uint32_t nominal_length, bool finalize_at_end,
+                                              std::int32_t rope_delta) {
     if (begin >= full_ids.size() || nominal_length == 0 ||
         nominal_length > full_ids.size() - begin) {
         throw std::invalid_argument("text prefill chunk is outside the prompt");
     }
-    const TextPrefill text_prefill{full_ids, begin};
+    const TextPrefill text_prefill{full_ids, begin, rope_delta};
     NullTap tap;
     return prefill_impl(full_ids.subspan(begin, nominal_length), &text_prefill, nullptr, tap,
                         finalize_at_end);
@@ -1331,12 +1386,12 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
 
 PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std::uint32_t begin,
                                               std::uint32_t nominal_length, bool finalize_at_end,
-                                              DFlashFeatureSink& sink) {
+                                              std::int32_t rope_delta, DFlashFeatureSink& sink) {
     if (begin >= full_ids.size() || nominal_length == 0 ||
         nominal_length > full_ids.size() - begin) {
         throw std::invalid_argument("text prefill chunk is outside the prompt");
     }
-    const TextPrefill text_prefill{full_ids, begin};
+    const TextPrefill text_prefill{full_ids, begin, rope_delta};
     return prefill_impl(full_ids.subspan(begin, nominal_length), &text_prefill, nullptr, sink,
                         finalize_at_end);
 }

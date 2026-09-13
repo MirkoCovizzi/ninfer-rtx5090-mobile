@@ -31,6 +31,7 @@ enum class KvCacheStorage : std::uint8_t {
     BFloat16,
     Int8Group64,
     Fp8E4M3Row256,
+    KvarnK4V2Group128,
     Nvfp4Group16,
     Fp8KeyNvfp4Value,
 };

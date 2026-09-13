@@ -142,6 +142,12 @@ ninfer_add_test(ninfer_qwen3_6_27b_prefix_real_test
   SOURCES targets/qwen3_6_27b/test_engine_prefix_real.cpp
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_6_27b_prefix_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_op_test(ninfer_qwen3_6_27b_prefill_precision_real_test
+  SOURCES targets/qwen3_6_27b/test_prefill_precision_real.cpp
+  LIBRARIES ninfer_engine)
+target_include_directories(ninfer_qwen3_6_27b_prefill_precision_real_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export)
 ninfer_add_test(ninfer_qwen3_6_27b_mtp_greedy_parity_real_test
   SOURCES targets/qwen3_6_27b/test_engine_mtp_greedy_parity_real.cpp
   LIBRARIES ninfer_engine)
@@ -293,6 +299,9 @@ set_tests_properties(
   PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_op_test(ninfer_sliding_window_attention_test
   SOURCES ops/test_sliding_window_attention.cpp
+  LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_kvarn_test
+  SOURCES ops/test_kvarn.cpp
   LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_kv_cache_append_test
   SOURCES ops/test_kv_cache_append.cpp

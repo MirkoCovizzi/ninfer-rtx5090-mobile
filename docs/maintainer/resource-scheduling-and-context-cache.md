@@ -323,6 +323,17 @@ Session key、marker、hash 和 prefix index 只缩小 candidate 集合，不证
 
 `rewrite_execution_frontiers` 也是 exact identity 的一部分。它记录 replay/root prefill 必须分段的 exact
 token frontiers，使重建路径采用与原生成路径一致的 execution decomposition；不能为了采用 endpoint 而忽略。
+These frontiers also include every prepared capture opportunity and the pre-assistant boundary.
+They are canonical execution metadata, independent of cache enablement and capture admission.
+Disabling retention or declining a candidate must not remove its prefill boundary: doing so can
+switch activation precision and recurrent-state decomposition, changing cold logits even with
+zero reused tokens. The same prepared prompt and prefill configuration therefore use the same
+arithmetic schedule with caching enabled or disabled; capture policy only decides whether to
+preserve the resulting state. Different explicit chunk sizes or decode batch schedules are not
+covered by this bitwise-equivalence requirement.
+`ninfer_qwen3_6_27b_prefill_precision_real_test` (with `NINFER_TEST_WEIGHTS` pointing to a 27B
+artifact) checks target logits, convolution/recurrent state, state-slot handoff, and cold Engine
+MTP output equality for this cache-policy contract.
 当 NInfer 自己生成的 accepted output 形成可由历史 renderer 精确重建的边界时，所有权链固定为：
 
 ```text
@@ -526,8 +537,9 @@ identity。候选创建 source 的顺序为：exact shared owner 直接 dedup；
 第一次模型 mutation 前做零-prefill promotion；更晚 frontier 由 active prefill capture。早于 selected
 reuse base 且没有现成 exact source 的候选只保留为需求观察，不回滚状态或重新 prefill。
 
-Shared candidate 必须在 prefill 前决定是否增加 split，而物理状态只能在 frontier 到达时确定。因此实现
-分为两步：
+Shared candidates select optional capture work, not numerical split points; all prepared candidate
+frontiers already belong to the canonical prefill schedule. Physical state is resolved when the
+frontier is reached, in two stages:
 
 1. admission 已选定 materialization source 后，ResourceManager 用完整逻辑 portfolio 的乐观收益上界和
    Program 返回的精确 split cost 选择 candidate subset；这一步不预留资源，也不承诺 publication；
