@@ -58,9 +58,16 @@ int main(int argc, char** argv) {
         options.context_cache.device_state_slots = argc > 7 ? std::stoul(argv[7]) : 3U;
         options.use_cuda_graph                   = graph;
         options.enable_vision                    = argc > 6 && std::stoi(argv[6]) != 0;
-        options.kv_cache                         = argc > 5 && std::string(argv[5]) == "int8"
-                                                       ? ninfer::KvCacheStorage::Int8Group64
-                                                       : ninfer::KvCacheStorage::BFloat16;
+        const std::string_view codec             = argc > 5 ? argv[5] : "bf16";
+        if (codec == "kvarn") {
+            options.kv_cache = ninfer::KvCacheStorage::KvarnK4V2Group128;
+        } else if (codec == "int8") {
+            options.kv_cache = ninfer::KvCacheStorage::Int8Group64;
+        } else if (codec == "bf16") {
+            options.kv_cache = ninfer::KvCacheStorage::BFloat16;
+        } else {
+            throw std::invalid_argument("DFlash2 test KV codec must be bf16, int8, or kvarn");
+        }
         std::vector<ninfer::TokenId> prompt, reference, penalty_reference;
         auto penalty                                 = request(24);
         penalty.execution.sampling.presence_penalty  = 0.5F;
@@ -142,6 +149,7 @@ int main(int argc, char** argv) {
         }
         ninfer::Engine engine(options);
         ninfer::test::speculative_page_boundary(engine);
+        if (codec == "kvarn") { ninfer::test::speculative_page_boundary(engine, 254); }
         const auto first = engine.generate(engine.prepare_tokens(prompt), request(24));
         valid(first, 24);
         require(first.generated_token_ids == reference,

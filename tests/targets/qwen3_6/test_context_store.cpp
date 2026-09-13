@@ -627,6 +627,55 @@ void test_kv_store(ninfer::DeviceContext& device) {
            "staged retained fork closes Device and Host ownership without leaks");
 }
 
+void test_g128_partial_fork(ninfer::DeviceContext& device) {
+    ninfer::LayoutBuilder builder;
+    const auto page_layout = ninfer::plan_device_kv_page_pool(
+        builder,
+        {.page_group_count = 4,
+         .geometry         = {
+                     .page_tokens = 128,
+                     .planes = {{.dtype = ninfer::DType::U8, .leading_extent = 210, .head_extent = 1}}}});
+    const auto table_layout =
+        ninfer::plan_kv_execution_tables(builder, {.logical_page_capacity = 2, .table_rows = 2});
+    ninfer::DeviceArena arena(builder.finish(256));
+    const ninfer::DeviceSpan backing{arena.base(), arena.capacity()};
+    ninfer::DeviceKVPagePool physical(backing, page_layout);
+    ninfer::KVExecutionTablePool tables(backing, table_layout, physical);
+    store::LogicalKVPageStore pages(physical, 4);
+    store::KVAddressSpaceStore addresses(pages, tables, 3, 2);
+    const auto source = addresses.create_active(2, 0);
+    addresses.ensure_mapped_to_tokens(*source, 64, device.stream);
+    addresses.commit_frontier(*source, 64);
+    addresses.set_checkpoint_requirement(*source, 64);
+    expect(addresses.mapped_pages(*source) == 1 &&
+               pages.committed_columns(addresses.logical_page(*source, 0)) == 64,
+           "G128 retains token 64 as a partial group");
+    addresses.deactivate(*source);
+    const auto destination = addresses.create_inactive();
+    auto fork              = addresses.prepare_prefix_fork(*source, *destination, 64, 2, 1);
+    expect(fork.needs_tail_copy(), "G128 fork at token 64 copies the partial quantization group");
+    physical.copy_page(addresses.prefix_fork_tail_source(fork),
+                       addresses.prefix_fork_tail_destination(fork), device.stream);
+    addresses.commit_prefix_fork(std::move(fork), device.stream);
+    addresses.ensure_mapped_to_tokens(*destination, 128, device.stream);
+    addresses.commit_frontier(*destination, 128);
+    expect(addresses.mapped_pages(*destination) == 1 &&
+               addresses.logical_page(*source, 0) != addresses.logical_page(*destination, 0) &&
+               pages.committed_columns(addresses.logical_page(*source, 0)) == 64 &&
+               pages.committed_columns(addresses.logical_page(*destination, 0)) == 128,
+           "G128 completion cannot overwrite a retained half-group");
+    addresses.ensure_mapped_to_tokens(*destination, 129, device.stream);
+    expect(addresses.mapped_pages(*destination) == 2,
+           "G128 allocates its second page at token 129");
+    addresses.destructive_truncate(*destination, 128);
+    expect(addresses.mapped_pages(*destination) == 1,
+           "G128 truncation releases the speculative second page");
+    addresses.deactivate(*destination);
+    expect(addresses.release(*destination) && addresses.release(*source) && pages.occupied() == 0,
+           "G128 retained and active ownership closes without leaked pages");
+    device.synchronize();
+}
+
 } // namespace
 
 int main() {
@@ -642,6 +691,7 @@ int main() {
         ninfer::DeviceContext device(0);
         test_state_store(device);
         test_kv_store(device);
+        test_g128_partial_fork(device);
         device.synchronize();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';

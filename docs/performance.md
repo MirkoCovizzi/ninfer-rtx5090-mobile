@@ -58,6 +58,16 @@ budgets, reproducible sampling, prefix reuse, partial terminal settlement, page 
 and (at K15) ring wrap and context exhaustion. They are correctness checks, not concurrency
 performance measurements.
 
+## KVarN Long-Context Integration
+
+`--kv-dtype kvarn` now selects K4V2-G128 with unquantized current-step attention and
+committed-group encoding. Its mathematical contract and qualification commands are in
+[Paged KV cache](maintainer/paged-kv-cache.md#kvarn-record-and-tail-semantics).
+The previous G64 throughput, acceptance, and ordinary/speculative parity measurements do not
+qualify this profile. No G128 end-to-end speedup, reasoning score, or retrieval-quality result is
+published here yet. Benchmark matched artifacts, chunk sizes, and sampling settings before
+comparing throughput; always report speculative acceptance alongside decode speed.
+
 ## Desktop Serving Results
 
 Tested Git revisions:

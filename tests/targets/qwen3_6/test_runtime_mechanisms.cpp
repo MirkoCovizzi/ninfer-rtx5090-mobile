@@ -108,6 +108,23 @@ void test_decoder_layout() {
     expect(fp8.kv_payload_bytes() == fp8.text_kv.payload_bytes() + fp8.mtp_kv->payload_bytes(),
            "FP8 Text/MTP KV payload accounting");
 
+    ninfer::LayoutBuilder kvarn_builder;
+    const q36::DecoderStateLayout kvarn = q36::plan_decoder_state(
+        kvarn_builder, decoder_spec(ninfer::KvCacheStorage::KvarnK4V2Group128, true));
+    (void)kvarn_builder.finish(256);
+    expect(kvarn.text_kv.pages.planes.size() == 2 &&
+               kvarn.text_kv.pages.planes[0].geometry.dtype == ninfer::DType::U8 &&
+               kvarn.text_kv.pages.planes[0].geometry.leading_extent ==
+                   ninfer::ops::kKvarnRecordBytes / ninfer::ops::kKvarnGroup &&
+               kvarn.text_kv.pages.spec.geometry.page_tokens == 128 &&
+               kvarn.text_kv.execution_tables.spec.logical_page_capacity == 2,
+           "KVarN uses one aligned record plane per layer");
+    expect(kvarn.text_kv.kvarn_tail_k.region.bytes != 0 &&
+               kvarn.text_kv.kvarn_tail_v.region.bytes != 0 &&
+               kvarn.text_kv.kvarn_tail_logical_pages.region.bytes != 0,
+           "KVarN owns fixed rotated sink/tail state");
+    expect(kvarn.mtp_kv && kvarn.mtp_kv->pages.planes.size() == 1,
+           "KVarN MTP uses the same record and tail profile");
     ninfer::LayoutBuilder nvfp4_builder;
     const q36::DecoderStateLayout nvfp4 = q36::plan_decoder_state(
         nvfp4_builder, decoder_spec(ninfer::KvCacheStorage::Nvfp4Group16, true));
