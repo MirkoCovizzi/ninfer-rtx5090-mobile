@@ -738,7 +738,8 @@ PreparedContextCache prepare_context_cache(
     std::span<const std::optional<std::uint32_t>> message_boundaries,
     std::span<const PromptCacheMarker> rendered_markers,
     std::span<const std::optional<std::uint32_t>> cache_boundaries,
-    std::span<const VisionItem> vision_items, std::optional<std::size_t> engine_tool_marker_index,
+    std::span<const std::uint32_t> execution_frontiers, std::span<const VisionItem> vision_items,
+    std::optional<std::size_t> engine_tool_marker_index,
     std::optional<std::uint32_t> leading_boundary, std::uint32_t full_prompt_frontier) {
     if (hints.markers.size() > kMaximumExplicitPromptCacheMarkers) {
         throw std::invalid_argument("PromptInput supports at most four explicit cache markers");
@@ -823,7 +824,10 @@ PreparedContextCache prepare_context_cache(
     out.opportunities.reserve(7U);
     const auto add_opportunity = [&](PromptCacheMarkerKind kind, SharedCandidateEvidence evidence,
                                      std::uint32_t frontier, std::uint32_t input_order) {
-        if (frontier == 0 || !exact_vision_frontier(frontier, vision_items)) { return; }
+        if (frontier == 0 || !exact_vision_frontier(frontier, vision_items) ||
+            !std::binary_search(execution_frontiers.begin(), execution_frontiers.end(), frontier)) {
+            return;
+        }
         const auto duplicate = std::find_if(
             out.opportunities.begin(), out.opportunities.end(), [&](const auto& existing) {
                 return existing.kind == kind && existing.frontier == frontier;
@@ -1486,10 +1490,27 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
     }
     (void)checked_token_count(result.token_ids.size());
     result.identity.reusable = true;
-    result.context_cache     = prepare_context_cache(
+    {
+        // Client-declared explicit write boundaries are part of the request's execution schedule.
+        // Server automatic hints are advisory: they capture only at positions that are already
+        // canonical, so implicit caching never fragments prefill or changes cold arithmetic.
+        auto& frontiers                = result.identity.rewrite_execution_frontiers;
+        const std::size_t marker_count = std::min(rendered_markers.size(), cache_boundaries.size());
+        for (std::size_t index = 0; index < marker_count; ++index) {
+            if (cache_boundaries[index] &&
+                has_shared_candidate_evidence(rendered_markers[index].evidence,
+                                              SharedCandidateEvidence::ExplicitBoundary)) {
+                frontiers.push_back(*cache_boundaries[index]);
+            }
+        }
+        frontiers.push_back(checked_token_count(result.token_ids.size()));
+        std::sort(frontiers.begin(), frontiers.end());
+        frontiers.erase(std::unique(frontiers.begin(), frontiers.end()), frontiers.end());
+    }
+    result.context_cache = prepare_context_cache(
         std::move(cache_hints), message_count, message_boundaries, rendered_markers,
-        cache_boundaries, result.vision_items, engine_tool_marker_index, leading_boundary,
-        checked_token_count(result.token_ids.size()));
+        cache_boundaries, result.identity.rewrite_execution_frontiers, result.vision_items,
+        engine_tool_marker_index, leading_boundary, checked_token_count(result.token_ids.size()));
     result.starts_in_reasoning =
         options.continuation == PromptContinuationMode::NewAssistantTurn && options.enable_thinking;
     result.prepare.seconds = std::chrono::duration<double>(Clock::now() - start).count();

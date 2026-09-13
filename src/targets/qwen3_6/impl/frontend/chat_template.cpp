@@ -517,6 +517,14 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     const bool preserve_thinking = options.preserve_thinking.value_or(effort_template);
     std::optional<RewriteCheckpointByteSpec> rewrite_checkpoint;
     std::vector<std::size_t> rewrite_execution_boundaries;
+    // Only structurally stable history positions are execution boundaries here: the end of the
+    // leading instruction run and the end of the tool preamble. Client-declared explicit write
+    // boundaries are resolved to token frontiers by the Frontend and join the same set; server
+    // automatic hints are advisory and never introduce a prefill split.
+    std::optional<std::size_t> leading_instruction_end;
+    if (message_begin == 1) { leading_instruction_end = message_boundaries[1]; }
+    bool leading_run = message_begin == 1;
+    std::vector<std::size_t> structural_boundaries;
     const auto add_rewrite_execution_boundary = [&] {
         if (rewrite_execution_boundaries.empty() ||
             rewrite_execution_boundaries.back() != rendered.size()) {
@@ -530,7 +538,11 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     for (std::size_t i = 0; i < messages.size(); ++i) {
         const ChatMessage& message = messages[i];
         if (i < message_begin) { continue; }
-        if (is_instruction_role(message.role)) { validate_instruction_message(message); }
+        if (is_instruction_role(message.role)) {
+            validate_instruction_message(message);
+        } else {
+            leading_run = false;
+        }
         std::vector<std::size_t> raw_part_boundaries;
         const RenderedFragment raw_content = message.rendered_content(
             options.add_vision_id, &image_count, &video_count, &media_count, &raw_part_boundaries);
@@ -558,6 +570,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
             rendered.append(content);
             rendered.append_template("<|im_end|>\n");
             message_boundaries[i + 1U] = rendered.size();
+            if (leading_run) { leading_instruction_end = message_boundaries[i + 1U]; }
             continue;
         }
         if (message.role == ChatRole::User) {
@@ -587,6 +600,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         }
 
         // assistant
+        add_rewrite_execution_boundary();
         if (continue_final_assistant && i + 1U == messages.size()) {
             const std::size_t generation_begin = rendered.size();
             rewrite_checkpoint                 = RewriteCheckpointByteSpec{
@@ -649,6 +663,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         // opener; placing it after the deterministic prologue makes the complete history
         // unrecoverable for the branch case merely to save a handful of prompt tokens.
         const std::size_t generation_begin = rendered.size();
+        add_rewrite_execution_boundary();
         if (preserve_thinking) {
             rewrite_checkpoint = RewriteCheckpointByteSpec{
                 .kind = RewriteCheckpointKind::ResponseReplay, .offset = generation_begin};
@@ -695,12 +710,15 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
             break;
         }
     }
+    if (leading_instruction_end) { structural_boundaries.push_back(*leading_instruction_end); }
+    if (!tool_boundaries.empty()) { structural_boundaries.push_back(tool_boundaries.back()); }
     RenderedFragment final = std::move(rendered).release();
     return RenderedChat{.text                         = std::move(final.text),
                         .literal_spans                = std::move(final.literal_spans),
                         .media_placeholders           = std::move(final.media_placeholders),
                         .rewrite_checkpoint           = rewrite_checkpoint,
                         .rewrite_execution_boundaries = std::move(rewrite_execution_boundaries),
+                        .structural_boundaries        = std::move(structural_boundaries),
                         .message_boundaries           = std::move(message_boundaries),
                         .cache_boundaries             = std::move(cache_boundaries)};
 }

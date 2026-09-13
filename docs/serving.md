@@ -366,6 +366,13 @@ rendered-token frontier is ignored without changing prompt content. `prompt_cach
 Engine session key or prefix identity. Valid TTL/retention values are accepted, but NInfer does not
 promise their wall-clock residency; physical retention follows the resource scheduler.
 
+Explicit write breakpoints are part of the request's execution schedule: their resolved token
+frontiers join the history's canonical execution boundaries, and prefill splits there. Automatic
+and implicit write targets are advisory only; they are captured when they coincide with a
+canonical boundary and never introduce a prefill split. The canonical set depends only on the
+represented history plus explicitly declared breakpoints, so unchanged prefixes retain the same
+prefill decomposition and remain eligible for exact reuse.
+
 ## OpenAI Responses Core
 
 NInfer implements the typed-Item and semantic-event core of the OpenAI
