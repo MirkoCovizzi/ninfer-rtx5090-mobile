@@ -585,6 +585,9 @@ RenderedChat expand_placeholders(RenderedChat rendered, const std::vector<Vision
     for (std::size_t& boundary : rendered.rewrite_execution_boundaries) {
         boundary = map_boundary(boundary, "rewrite execution boundary");
     }
+    for (std::size_t& boundary : rendered.structural_boundaries) {
+        boundary = map_boundary(boundary, "structural boundary");
+    }
     for (std::optional<std::size_t>& boundary : rendered.message_boundaries) {
         if (boundary) { *boundary = map_boundary(*boundary, "message boundary"); }
     }
@@ -747,15 +750,17 @@ EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat&
     }
     EncodedChat encoded;
     std::vector<std::size_t> byte_boundaries;
-    byte_boundaries.reserve((rendered.rewrite_checkpoint ? 1U : 0U) +
-                            rendered.rewrite_execution_boundaries.size() +
-                            rendered.message_boundaries.size() + rendered.cache_boundaries.size() +
-                            rendered.media_token_runs.size() * 2U);
+    byte_boundaries.reserve(
+        (rendered.rewrite_checkpoint ? 1U : 0U) + rendered.rewrite_execution_boundaries.size() +
+        rendered.structural_boundaries.size() + rendered.message_boundaries.size() +
+        rendered.cache_boundaries.size() + rendered.media_token_runs.size() * 2U);
     if (rendered.rewrite_checkpoint) {
         byte_boundaries.push_back(rendered.rewrite_checkpoint->offset);
     }
     byte_boundaries.insert(byte_boundaries.end(), rendered.rewrite_execution_boundaries.begin(),
                            rendered.rewrite_execution_boundaries.end());
+    byte_boundaries.insert(byte_boundaries.end(), rendered.structural_boundaries.begin(),
+                           rendered.structural_boundaries.end());
     for (const std::optional<std::size_t> boundary : rendered.message_boundaries) {
         if (boundary) { byte_boundaries.push_back(*boundary); }
     }
@@ -791,7 +796,8 @@ EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat&
         encoded.rewrite_checkpoint =
             RewriteCheckpointSpec{.kind = rendered.rewrite_checkpoint->kind, .frontier = frontier};
     }
-    encoded.rewrite_execution_frontiers.reserve(rendered.rewrite_execution_boundaries.size());
+    encoded.rewrite_execution_frontiers.reserve(rendered.rewrite_execution_boundaries.size() +
+                                                rendered.structural_boundaries.size());
     for (std::size_t remaining = rendered.rewrite_execution_boundaries.size(); remaining != 0;
          --remaining) {
         const TokenBoundaryResult& result = tokenized.boundaries.at(boundary_index++);
@@ -805,6 +811,17 @@ EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat&
             encoded.rewrite_execution_frontiers.push_back(*frontier);
         }
     }
+    for (std::size_t remaining = rendered.structural_boundaries.size(); remaining != 0;
+         --remaining) {
+        const auto& boundary = tokenized.boundaries.at(boundary_index++);
+        if (boundary.stable_frontier != 0) {
+            encoded.rewrite_execution_frontiers.push_back(
+                to_frontier(boundary.stable_frontier, "structural boundary"));
+        }
+    }
+    auto& frontiers = encoded.rewrite_execution_frontiers;
+    std::sort(frontiers.begin(), frontiers.end());
+    frontiers.erase(std::unique(frontiers.begin(), frontiers.end()), frontiers.end());
     encoded.message_boundaries.resize(rendered.message_boundaries.size());
     for (std::size_t index = 0; index < rendered.message_boundaries.size(); ++index) {
         if (rendered.message_boundaries[index]) {
