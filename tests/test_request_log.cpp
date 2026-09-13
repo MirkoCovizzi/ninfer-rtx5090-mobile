@@ -191,6 +191,14 @@ int main() {
         memory, environment, std::uint64_t{123456}));
     failures +=
         check(k8v4_server.at("engine").at("kv_cache") == "k8v4", "K8V4 KV report name missing");
+    options.kv_cache        = ninfer::KvCacheStorage::KvarnK4V2Group128;
+    engine_options.kv_cache = options.kv_cache;
+    memory.kv_cache         = options.kv_cache;
+    const Json kvarn_server = Json::parse(format_server_start_json(
+        "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias", load,
+        memory, environment, std::uint64_t{123456}));
+    failures += check(kvarn_server.at("engine").at("kv_cache") == "kvarn-k4v2-group128",
+                      "KVarN G128 KV report name missing");
     failures += check(server.at("engine").at("vision") == false, "Vision state missing");
     failures += check(server.at("engine").at("speculative_backend") == "mtp",
                       "speculative backend missing");

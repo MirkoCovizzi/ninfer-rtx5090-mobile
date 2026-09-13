@@ -1,4 +1,6 @@
 #include "ninfer/engine.h"
+#include "../qwen3_6/speculative_page_boundary.h"
+#include "../qwen3_6/vision_prefix.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -164,6 +166,24 @@ ninfer::EngineOptions concurrent_engine_options(const char* artifact) {
     options.context_cache.max_private_continuations         = 8;
     options.context_cache.max_shared_prefixes               = 0;
     options.context_cache.max_long_anchors_per_continuation = 0;
+    return options;
+}
+
+ninfer::EngineOptions kvarn_continuation_engine_options(const char* artifact) {
+    ninfer::EngineOptions options;
+    options.artifact_path                    = artifact;
+    options.max_context                      = 512;
+    options.kv_capacity                      = ninfer::KvCapacityPolicy::explicit_capacity(1024);
+    options.prefill_chunk                    = 256;
+    options.kv_cache                         = ninfer::KvCacheStorage::KvarnK4V2Group128;
+    options.speculative.backend              = ninfer::SpeculativeBackend::Mtp;
+    options.speculative.draft_tokens         = 3;
+    options.speculative.proposal_head        = ninfer::ProposalHead::Optimized;
+    options.max_concurrency                  = 2;
+    options.max_pending_requests             = 2;
+    options.context_cache.device_state_slots = 4;
+    options.context_cache.max_private_continuations = 2;
+    options.context_cache.max_shared_prefixes       = 0;
     return options;
 }
 
@@ -411,6 +431,47 @@ int exercise_zero_suffix_reuse(ninfer::Engine& engine, const std::vector<ninfer:
     if (reused.generated_token_ids.size() != 2 ||
         reused.generated_token_ids[0] != baseline.generated_token_ids.back()) {
         std::cerr << "zero-suffix reuse did not resume from the retained target frontier\n";
+        return 1;
+    }
+    return 0;
+}
+
+int exercise_kvarn_continuation(const char* artifact) {
+    ninfer::Engine engine(kvarn_continuation_engine_options(artifact));
+    const auto request = [](bool reuse, std::uint32_t outputs) {
+        ninfer::RequestOptions options;
+        options.execution.requested_output_tokens = outputs;
+        options.execution.sampling.temperature    = 0.0F;
+        options.execution.allow_prefix_reuse      = reuse;
+        options.stop.include_model_defaults       = false;
+        return options;
+    };
+
+    // Position 191 makes initial MTP drafting cross the first non-sink page boundary.
+    const std::vector<ninfer::TokenId> prompt(191, 198);
+    const ninfer::GenerationResult source =
+        engine.generate(engine.prepare_tokens(prompt), request(true, 4));
+    if (source.generated_token_ids.size() != 4) {
+        std::cerr << "KVarN continuation source did not complete\n";
+        return 1;
+    }
+    std::vector<ninfer::TokenId> continuation = prompt;
+    continuation.insert(continuation.end(), source.generated_token_ids.begin(),
+                        source.generated_token_ids.end() - 1);
+
+    const ninfer::GenerationResult baseline =
+        engine.generate(engine.prepare_tokens(continuation), request(false, 1));
+    std::vector<ninfer::TokenId> filler_prompt(193, 197);
+    auto filler = engine.submit(engine.prepare_tokens(std::move(filler_prompt)), request(false, 8));
+    auto resumed = engine.submit(engine.prepare_tokens(continuation), request(true, 1));
+    const ninfer::GenerationResult resumed_result = resumed.wait();
+    const ninfer::GenerationResult filler_result  = filler.wait();
+    if (baseline.generated_token_ids.size() != 1 || filler_result.generated_token_ids.size() != 8 ||
+        resumed_result.generated_token_ids.size() != 1 ||
+        resumed_result.reused_prompt_tokens != continuation.size() ||
+        resumed_result.generated_token_ids != baseline.generated_token_ids) {
+        std::cerr << "KVarN continuation changed after cross-row activation: reused="
+                  << resumed_result.reused_prompt_tokens << '\n';
         return 1;
     }
     return 0;
@@ -1427,7 +1488,8 @@ int exercise_rewrite_branch(const char* artifact) {
     return 0;
 }
 
-int exercise_vision(ninfer::Engine& engine) {
+int exercise_vision(ninfer::Engine& engine,
+                    std::vector<ninfer::TokenId>* placement_tokens = nullptr) {
     const auto image_bytes = gradient_ppm();
     auto image_part        = [](const std::vector<std::uint8_t>& bytes, std::string name) {
         ninfer::MessagePart image;
@@ -1554,8 +1616,11 @@ int exercise_vision(ninfer::Engine& engine) {
         return 1;
     }
 
-    ninfer::RequestOptions mtp_options            = options(false);
+    ninfer::RequestOptions mtp_options            = options(true);
     mtp_options.execution.requested_output_tokens = 5;
+    // Select the stop token from the same retained frontier and capture policy as the stopped
+    // request. Capture boundaries can change the numerical prefill schedule even on a cache miss.
+    (void)engine.generate(engine.prepare(first_input(image_bytes)), mtp_options);
     const ninfer::GenerationResult mtp_baseline =
         engine.generate(engine.prepare(first_input(image_bytes)), mtp_options);
     if (mtp_baseline.generated_token_ids.size() != 5 ||
@@ -1572,7 +1637,13 @@ int exercise_vision(ninfer::Engine& engine) {
         stopped.generated_token_ids.size() != 2 ||
         stopped.generated_token_ids[0] != mtp_baseline.generated_token_ids[0] ||
         stopped.generated_token_ids[1] != mtp_baseline.generated_token_ids[1]) {
-        std::cerr << "multimodal custom stop did not terminate at the selected token\n";
+        std::cerr << "multimodal custom stop did not terminate at the selected token: reused="
+                  << stopped.reused_prompt_tokens
+                  << " outputs=" << stopped.generated_token_ids.size()
+                  << " baseline=" << mtp_baseline.generated_token_ids[0] << ','
+                  << mtp_baseline.generated_token_ids[1] << " actual=";
+        for (const auto token : stopped.generated_token_ids) { std::cerr << token << ','; }
+        std::cerr << '\n';
         return 1;
     }
     const ninfer::GenerationResult stopped_reuse =
@@ -1597,6 +1668,8 @@ int exercise_vision(ninfer::Engine& engine) {
     const ninfer::GenerationResult visual_bridge =
         engine.generate(engine.prepare(first_input(image_bytes)), bridge_options);
     if (bridge_source.generated_token_ids.size() != 1 ||
+        visual_bridge.generated_token_ids.size() != 5 ||
+        visual_bridge.finish_reason != ninfer::FinishReason::OutputLimit ||
         visual_bridge.reused_prompt_tokens != visual_prefix.size() ||
         !(visual_bridge.timings.vision_seconds > 0.0) || visual_bridge.speculative.rounds == 0) {
         std::cerr << "visual MTP bridge did not append the prefix and enter speculative decode: "
@@ -1611,7 +1684,17 @@ int exercise_vision(ninfer::Engine& engine) {
     bridge_baseline_options.execution.allow_prefix_reuse = false;
     const ninfer::GenerationResult visual_bridge_baseline =
         engine.generate(engine.prepare(first_input(image_bytes)), bridge_baseline_options);
-    if (visual_bridge.generated_token_ids != visual_bridge_baseline.generated_token_ids) {
+    if (visual_bridge_baseline.generated_token_ids.size() != 5 ||
+        visual_bridge_baseline.finish_reason != ninfer::FinishReason::OutputLimit) {
+        std::cerr << "visual MTP full-prefill control did not complete\n";
+        return 1;
+    }
+    // KVarN qualifies this output across identical bridge schedules with different checkpoint
+    // placement. Full prefill has a different unquantized-current-chunk lifetime.
+    if (placement_tokens != nullptr) {
+        placement_tokens->insert(placement_tokens->end(), visual_bridge.generated_token_ids.begin(),
+                                 visual_bridge.generated_token_ids.end());
+    } else if (visual_bridge.generated_token_ids != visual_bridge_baseline.generated_token_ids) {
         std::cerr << "visual MTP bridge changed greedy output relative to full prefill\n";
         return 1;
     }
@@ -2196,6 +2279,57 @@ int main() {
         const int result = exercise_pressure_partial_spill_and_resume(qwen38_nvfp4);
         if (result == 0) { std::cout << "ok\n"; }
         return result;
+    }
+    if (scenario != nullptr && std::string_view(scenario) == "kvarn-continuation") {
+        const char* artifact = nvfp4 != nullptr && *nvfp4 != '\0' ? nvfp4 : groupwise;
+        if (artifact == nullptr || *artifact == '\0') {
+            std::cerr << "kvarn-continuation requires a Qwen3.6 27B artifact\n";
+            return 1;
+        }
+        const int result = exercise_kvarn_continuation(artifact);
+        if (result == 0) { std::cout << "ok\n"; }
+        return result;
+    }
+    if (scenario != nullptr && std::string_view(scenario) == "kvarn-vision") {
+        if (qwen38_nvfp4 == nullptr || *qwen38_nvfp4 == '\0') {
+            std::cerr << "kvarn-vision requires NINFER_QWEN3_8_27B_NVFP4_WEIGHTS\n";
+            return 1;
+        }
+        try {
+            std::vector<ninfer::TokenId> device_vision_tokens;
+            for (const unsigned device_slots : {4U, 0U}) {
+                auto configured                     = engine_options(qwen38_nvfp4);
+                configured.kv_cache                 = ninfer::KvCacheStorage::KvarnK4V2Group128;
+                configured.speculative.draft_tokens = 5;
+                configured.context_cache.device_state_slots = device_slots;
+                ninfer::Engine engine(std::move(configured));
+                ninfer::test::speculative_page_boundary(engine, 254);
+                auto vision_tokens =
+                    ninfer::test::vision_prefix_reuse(engine, ninfer::SpeculativeBackend::Mtp);
+                if (const int result = exercise_vision(engine, &vision_tokens); result != 0) {
+                    return result;
+                }
+                if (device_slots != 0) {
+                    device_vision_tokens = vision_tokens;
+                } else if (vision_tokens != device_vision_tokens) {
+                    throw std::runtime_error(
+                        "MTP new-media output changed across Host/Device checkpoint placement");
+                }
+                const auto stats = engine.runtime_stats();
+                if (device_slots == 0 &&
+                    (stats.state_d2h_count == 0 || stats.state_h2d_count == 0)) {
+                    throw std::runtime_error("KVarN MTP did not restore Host checkpoint state");
+                }
+                std::cout << "kvarn MTP5 Vision device_slots=" << device_slots
+                          << " state_d2h=" << stats.state_d2h_count
+                          << " state_h2d=" << stats.state_h2d_count << '\n';
+            }
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+        std::cout << "ok\n";
+        return 0;
     }
     if (scenario != nullptr && std::string_view(scenario) == "private-checkpoint-pressure") {
         if (qwen38_nvfp4 == nullptr || *qwen38_nvfp4 == '\0') {

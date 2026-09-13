@@ -32,7 +32,8 @@ struct PlannedPool {
     std::size_t bytes = 0;
 };
 
-PlannedPool plan_pool(bool dflash, std::int32_t slots = 4, bool dflash2 = false) {
+PlannedPool plan_pool(bool dflash, std::int32_t slots = 4, bool dflash2 = false,
+                      bool kvarn = false) {
     q36::StateImageSpec spec{
         .linear =
             {
@@ -55,6 +56,10 @@ PlannedPool plan_pool(bool dflash, std::int32_t slots = 4, bool dflash2 = false)
                                                             .head_dim = 128}
                                 : q36::DFlashLocalStateSpec{
                                       .layers = 2, .capacity = 17, .kv_heads = 2, .head_dim = 4};
+    }
+    if (kvarn) {
+        spec.kvarn = q36::KvarnContinuationStateSpec{
+            .text_layers = 2, .mtp_layers = 1, .kv_heads = 2, .head_dim = 256};
     }
     ninfer::LayoutBuilder builder;
     q36::StateImageDeviceLayout layout = q36::plan_state_image_device_pool(builder, spec);
@@ -91,6 +96,20 @@ void fill_slot(q36::StateImageDevicePool& pool, std::int32_t slot, unsigned char
             set_bytes(view.v.slice(3, slot, 1), static_cast<unsigned char>(base + 0x40 + layer));
         }
     }
+    if (pool.has_kvarn()) {
+        for (std::uint32_t layer = 0; layer < pool.kvarn_text_layers(); ++layer) {
+            const auto tail = pool.kvarn_text_tail(layer, slot);
+            set_bytes(tail.k, static_cast<unsigned char>(base + 0x50 + layer));
+            set_bytes(tail.v, static_cast<unsigned char>(base + 0x60 + layer));
+            set_bytes(tail.logical_pages, static_cast<unsigned char>(base + 0x70 + layer));
+        }
+        for (std::uint32_t layer = 0; layer < pool.kvarn_mtp_layers(); ++layer) {
+            const auto tail = pool.kvarn_mtp_tail(layer, slot);
+            set_bytes(tail.k, static_cast<unsigned char>(base + 0x80 + layer));
+            set_bytes(tail.v, static_cast<unsigned char>(base + 0x90 + layer));
+            set_bytes(tail.logical_pages, static_cast<unsigned char>(base + 0xa0 + layer));
+        }
+    }
 }
 
 void expect_slot(q36::StateImageDevicePool& pool, std::int32_t slot, unsigned char base,
@@ -112,6 +131,22 @@ void expect_slot(q36::StateImageDevicePool& pool, std::int32_t slot, unsigned ch
                          label);
         }
     }
+    if (pool.has_kvarn()) {
+        for (std::uint32_t layer = 0; layer < pool.kvarn_text_layers(); ++layer) {
+            const auto tail = pool.kvarn_text_tail(layer, slot);
+            expect_bytes(tail.k, static_cast<unsigned char>(base + 0x50 + layer), "KVarN Text K");
+            expect_bytes(tail.v, static_cast<unsigned char>(base + 0x60 + layer), "KVarN Text V");
+            expect_bytes(tail.logical_pages, static_cast<unsigned char>(base + 0x70 + layer),
+                         "KVarN Text markers");
+        }
+        for (std::uint32_t layer = 0; layer < pool.kvarn_mtp_layers(); ++layer) {
+            const auto tail = pool.kvarn_mtp_tail(layer, slot);
+            expect_bytes(tail.k, static_cast<unsigned char>(base + 0x80 + layer), "KVarN MTP K");
+            expect_bytes(tail.v, static_cast<unsigned char>(base + 0x90 + layer), "KVarN MTP V");
+            expect_bytes(tail.logical_pages, static_cast<unsigned char>(base + 0xa0 + layer),
+                         "KVarN MTP markers");
+        }
+    }
 }
 
 void expect_zero_slot(q36::StateImageDevicePool& pool, std::int32_t slot, std::string_view label) {
@@ -127,10 +162,25 @@ void expect_zero_slot(q36::StateImageDevicePool& pool, std::int32_t slot, std::s
             expect_bytes(view.v.slice(3, slot, 1), 0, label);
         }
     }
+    if (pool.has_kvarn()) {
+        for (std::uint32_t layer = 0; layer < pool.kvarn_text_layers(); ++layer) {
+            const auto tail = pool.kvarn_text_tail(layer, slot);
+            expect_bytes(tail.k, 0, label);
+            expect_bytes(tail.v, 0, label);
+            expect_bytes(tail.logical_pages, 0xff, label);
+        }
+        for (std::uint32_t layer = 0; layer < pool.kvarn_mtp_layers(); ++layer) {
+            const auto tail = pool.kvarn_mtp_tail(layer, slot);
+            expect_bytes(tail.k, 0, label);
+            expect_bytes(tail.v, 0, label);
+            expect_bytes(tail.logical_pages, 0xff, label);
+        }
+    }
 }
 
-void test_host_roundtrip(bool dflash, ninfer::DeviceContext& device, bool dflash2 = false) {
-    PlannedPool planned = plan_pool(dflash, 2, dflash2);
+void test_host_roundtrip(bool dflash, ninfer::DeviceContext& device, bool dflash2 = false,
+                         bool kvarn = false) {
+    PlannedPool planned = plan_pool(dflash, 2, dflash2, kvarn);
     if (dflash2) {
         expect(q36::dflash_local_transfer_work(planned.layout.host).payload_bytes ==
                    40ULL * 1024 * 1024,
@@ -139,6 +189,9 @@ void test_host_roundtrip(bool dflash, ninfer::DeviceContext& device, bool dflash
     ninfer::DeviceArena arena(planned.bytes);
     q36::StateImageDevicePool pool({arena.base(), arena.capacity()}, planned.layout);
     fill_slot(pool, 0, dflash ? 0x19 : 0x25);
+    pool.copy_slot(0, 1, device.stream);
+    device.synchronize();
+    expect_slot(pool, 1, dflash ? 0x19 : 0x25, "StateImage Device fork");
     pool.zero_slot(1, device.stream);
 
     q36::HostStatePool host(planned.layout.host, 1);
@@ -213,6 +266,8 @@ int main() {
     test_host_roundtrip(false, device);
     test_host_roundtrip(true, device);
     test_host_roundtrip(true, device, true);
+    test_host_roundtrip(false, device, false, true);
+    test_host_roundtrip(true, device, true, true);
 
     return failures == 0 ? 0 : 1;
 }

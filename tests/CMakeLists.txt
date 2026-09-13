@@ -294,6 +294,9 @@ set_tests_properties(
 ninfer_add_op_test(ninfer_sliding_window_attention_test
   SOURCES ops/test_sliding_window_attention.cpp
   LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_kvarn_test
+  SOURCES ops/test_kvarn.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_kv_cache_append_test
   SOURCES ops/test_kv_cache_append.cpp
   LIBRARIES ninfer_ops)

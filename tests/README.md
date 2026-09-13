@@ -144,8 +144,19 @@ NINFER_MTP_GREEDY_PARITY_WEIGHTS=/path/to/qwen3_8_27b_nvfp4.ninfer \
   ctest --test-dir build -R ninfer_qwen3_6_27b_mtp_greedy_parity_real_test --output-on-failure
 ```
 
-For a focused reproduction, the executable accepts optional `K C bf16|int8` arguments, for example
-`4 7 bf16`. With no arguments it runs the complete matrix.
+For a focused reproduction, use `--draft-tokens 4 --concurrency 7 --kv-dtype bf16`.
+Without selectors it runs the BF16/INT8 matrix and the KVarN long-decode fixtures.
+`--kvarn-repeatability` selects KVarN K4V2-G128; `--sample 1 --output-tokens 8192` checks
+long generation against a fresh execution of the same backend and draft count.
+An explicit `--corpus PATH` enables long resident prompts: samples 3..7 contain 8,190, 32,799,
+122,879, 196,607, and 245,743 tokens. Use `--prefix-reuse --concurrency 2` to exercise restored,
+unequal concurrent rows, or `--no-cuda-graph --full-proposal-head` for eager/full-head execution.
+The same KVarN harness accepts `--spec dflash2`, with draft counts 1, 3, 7, and 15, against the
+same-backend repeatability criterion; its artifact must contain the DFlash2 companion.
+KVarN follows Huawei's committed-group flush policy: current-step values remain unquantized
+through attention, so different speculative widths need not produce the ordinary token stream.
+The Op suite independently checks raw-current-chunk attention, represented history, and accepted
+group encoding against mathematical oracles; repeatability is supplementary state-lifetime evidence.
 
 The DFlash2 test also accepts the converted QUASAR artifact. Positional arguments select draft
 count, graphs, optimized proposal head, concurrency, KV storage, and optional Vision:
@@ -154,6 +165,17 @@ count, graphs, optimized proposal head, concurrency, KV storage, and optional Vi
 NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS=$PWD/out/quasar-dflash2/qwen3_8_27b_nvfp4.ninfer \
   ./build/tests/ninfer_qwen3_8_27b_dflash2_real_test 15 1 1 2 int8
 ```
+
+KV storage can be `bf16`, `int8`, or `kvarn`. Append `1 0` to enable Vision and force Host
+StateImage snapshots with zero extra Device slots. The image/video reuse checks require zero
+Vision execution on the reused request and new Vision execution for an appended media item.
+Same-input reuse checks exact generated-token agreement; new-media and KVarN visual-bridge checks
+compare identical request schedules across Host/Device checkpoint placement, not against a
+numerically different full-prefill schedule. The MTP KVarN Vision continuation suite is selected by
+`NINFER_PREFIX_REAL_SCENARIO=kvarn-vision` with `NINFER_QWEN3_8_27B_NVFP4_WEIGHTS` set on
+`ninfer_qwen3_6_27b_prefix_real_test`. It runs MTP5 with four and zero extra Device slots, checks
+stop/resume at the 255-token committed frontier, exercises cross-chunk Vision and media follow-ups,
+and requires actual Host StateImage capture and restoration in the zero-slot configuration.
 
 Run the peer 35B-A3B route independently:
 

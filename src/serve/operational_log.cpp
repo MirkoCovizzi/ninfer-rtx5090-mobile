@@ -139,6 +139,8 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case ninfer::KvCacheStorage::KvarnK4V2Group128:
+        return "kvarn";
     }
     return "unknown";
 }
