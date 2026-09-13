@@ -139,7 +139,7 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
                                                     std::span<const TokenId> ids,
                                                     std::uint32_t nominal_length,
                                                     std::optional<std::uint32_t> split_frontier,
-                                                    bool finalize_at_end);
+                                                    bool finalize_at_end, std::int32_t rope_delta);
 
 [[nodiscard]] PrefillChunkResult
 prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt,
