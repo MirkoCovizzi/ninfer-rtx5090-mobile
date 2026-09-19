@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "core/device.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
@@ -264,9 +265,9 @@ int run_q4_q5() {
     constexpr std::int32_t kValueRows = 6144;
     constexpr std::int32_t kZRows     = 6144;
     DevicePackedWeight qk(
-        quantized_weight::make_patterned_weight(QType::Q4G64_F16S, 4096, kHidden, 1401U));
+        quantized_weight::make_patterned_weight(QType::Q4_G64_FP16, 4096, kHidden, 1401U));
     DevicePackedWeight value_z(
-        quantized_weight::make_patterned_weight(QType::Q5G64_F16S, 12288, kHidden, 1403U));
+        quantized_weight::make_patterned_weight(QType::Q5_G64_FP16, 12288, kHidden, 1403U));
 
     int failures   = 0;
     const auto run = [&](std::int32_t width, std::int32_t batch, std::vector<std::int32_t> valid,
@@ -306,12 +307,12 @@ int run_q4_q5() {
     return failures;
 }
 
-int run_w8() {
+int run_q8() {
     constexpr std::int32_t kHidden    = 2048;
     constexpr std::int32_t kValueRows = 4096;
     constexpr std::int32_t kZRows     = 4096;
     DevicePackedWeight parent(
-        quantized_weight::make_patterned_weight(QType::W8G32_F16S, 12288, kHidden, 1501U));
+        quantized_weight::make_patterned_weight(QType::Q8_G32_FP16, 12288, kHidden, 1501U));
 
     int failures   = 0;
     const auto run = [&](std::int32_t width, std::int32_t batch, std::vector<std::int32_t> valid,
@@ -322,7 +323,7 @@ int run_w8() {
         const std::size_t record_bytes = ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
             kQueryRows, kKeyRows, kValueRows, batch, width, width);
         return run_case(
-            "W8 B=" + std::to_string(batch) + " T=" + std::to_string(width), kHidden, kValueRows,
+            "Q8 B=" + std::to_string(batch) + " T=" + std::to_string(width), kHidden, kValueRows,
             kZRows, width, batch, std::move(valid), snapshot_bytes, record_bytes,
             [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid_columns,
                 const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
@@ -342,7 +343,7 @@ int run_w8() {
     failures += run(2, 1, {1}, 1511U);
     failures += run(16, 1, {}, 1521U);
     failures += run(16, 8, {16, 13, 9, 7, 5, 3, 2, 1}, 1531U);
-    failures += parent.verify_preserved("W8 record parent weight");
+    failures += parent.verify_preserved("Q8 record parent weight");
     return failures;
 }
 
@@ -444,7 +445,7 @@ int run_fp8_oracle_case(DevicePackedWeight& parent, std::int32_t width, std::int
     Tensor value_view(value.data(), DType::BF16, {kValueRows, width, batch});
     Tensor z_view(z.data(), DType::BF16, {kZRows, width, batch});
     const std::size_t workspace_bytes = ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, policy, batch, width, width);
+        QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, policy, batch, width, width);
     WorkspaceArena workspace(std::max<std::size_t>(256, workspace_bytes));
 
     ops::gdn_input_proj_conv_record(x, parent.view(), conv_weight, state, valid, initial,
@@ -553,9 +554,9 @@ int run_fp8_oracle_case(DevicePackedWeight& parent, std::int32_t width, std::int
 int run_fp8_case(DevicePackedWeight& parent, std::int32_t width, std::int32_t batch,
                  std::vector<std::int32_t> valid, ops::LinearPolicy policy, std::uint32_t seed) {
     const std::size_t snapshot_bytes = ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, 16384, 5120, policy, batch, width, width);
+        QType::FP8_E4M3FN_ROW_BF16, 16384, 5120, policy, batch, width, width);
     const std::size_t record_bytes = ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, 16384, 5120, policy, batch, width, width);
+        QType::FP8_E4M3FN_ROW_BF16, 16384, 5120, policy, batch, width, width);
     return run_case(
         "FP8 policy=" + std::to_string(static_cast<int>(policy)) + " B=" + std::to_string(batch) +
             " W=" + std::to_string(width),
@@ -578,8 +579,8 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t width, std::int32_t ba
 int run_fp8() {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 16384;
-    DevicePackedWeight parent(quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16S,
-                                                                      kRows, kHidden, 1701U));
+    DevicePackedWeight parent(
+        quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, 1701U));
     int failures = 0;
     for (auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
         failures += run_fp8_oracle_case(parent, 2, 1, {}, policy, 1702U);
@@ -608,7 +609,7 @@ int main() {
     const auto fp8_record_capacity = [](ops::LinearPolicy policy, std::int32_t batch,
                                         std::int32_t min_width, std::int32_t max_width) {
         return ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
-            QType::FP8_E4M3FN_ROW_BF16S, 16384, 5120, policy, batch, min_width, max_width);
+            QType::FP8_E4M3FN_ROW_BF16, 16384, 5120, policy, batch, min_width, max_width);
     };
     const std::size_t fp8_b1_w2 = fp8_record_capacity(ops::LinearPolicy::AllowA8, 1, 2, 2);
     const std::size_t fp8_b2_w2 = fp8_record_capacity(ops::LinearPolicy::AllowA8, 2, 2, 2);
@@ -620,7 +621,7 @@ int main() {
         ++failures;
     }
     failures += run_q4_q5();
-    failures += run_w8();
+    failures += run_q8();
     failures += run_nvfp4();
     failures += run_fp8();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_record\n";

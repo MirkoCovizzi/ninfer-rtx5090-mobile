@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ninfer/ops/linear_add.h"
 #include "core/device.h"
 
@@ -105,7 +106,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
     }
     constexpr std::int32_t kMaximumTokens = 1024;
     quantized_weight::PackedWeight host_weight =
-        quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16S, n, k, seed);
+        quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16, n, k, seed);
     const std::vector<std::int32_t> rows = sampled_indices(n);
     const std::vector<float> materialized_weight =
         quantized_weight::materialize_rows_fp32(host_weight, rows);
@@ -126,7 +127,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Tensor x(device_activation.data(), DType::BF16, {k, invocation.tokens});
         Tensor residual(output.data(), DType::BF16, {n, invocation.tokens});
         const std::size_t capacity = ops::linear_add_workspace_capacity_bytes(
-            QType::FP8_E4M3FN_ROW_BF16S, n, k, invocation.policy, invocation.tokens,
+            QType::FP8_E4M3FN_ROW_BF16, n, k, invocation.policy, invocation.tokens,
             invocation.tokens);
         WorkspaceArena workspace(std::max<std::size_t>(capacity, 256));
         ops::linear_add(x, weight, residual, invocation.policy, workspace, nullptr);
@@ -199,17 +200,17 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
     failures += verify_preserved(device_weight, host_weight.payload, "FP8 linear_add weight");
 
     const std::size_t a16_interval = ops::linear_add_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::A16Only, 1, 2048);
+        QType::FP8_E4M3FN_ROW_BF16, n, k, ops::LinearPolicy::A16Only, 1, 2048);
     const std::size_t exact_one = ops::linear_add_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1, 1);
+        QType::FP8_E4M3FN_ROW_BF16, n, k, ops::LinearPolicy::AllowA8, 1, 1);
     const std::size_t hot_interval = ops::linear_add_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1, 48);
+        QType::FP8_E4M3FN_ROW_BF16, n, k, ops::LinearPolicy::AllowA8, 1, 48);
     const std::size_t exact_48 = ops::linear_add_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 48, 48);
+        QType::FP8_E4M3FN_ROW_BF16, n, k, ops::LinearPolicy::AllowA8, 48, 48);
     const std::size_t through_1024 = ops::linear_add_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1, 1024);
+        QType::FP8_E4M3FN_ROW_BF16, n, k, ops::LinearPolicy::AllowA8, 1, 1024);
     const std::size_t exact_1024 = ops::linear_add_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1024, 1024);
+        QType::FP8_E4M3FN_ROW_BF16, n, k, ops::LinearPolicy::AllowA8, 1024, 1024);
     if (a16_interval != 0 || exact_one == 0 || hot_interval != exact_48 ||
         through_1024 != exact_1024 || exact_1024 <= exact_48) {
         std::cerr << "FP8 linear_add [" << n << ',' << k

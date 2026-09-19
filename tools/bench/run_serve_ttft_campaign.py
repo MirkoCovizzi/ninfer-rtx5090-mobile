@@ -34,6 +34,9 @@ HOST = "127.0.0.1"
 PORT = 18080
 
 RESOURCE_CASES = (
+    "shared-state-working-set-shift",
+    "private-state-working-set-shift",
+    "shared-state-hot-prefix",
     "resume-after-interference-device",
     "resume-after-interference-state-host",
     "resume-after-interference-kv-host",
@@ -92,8 +95,9 @@ def _stage_weights() -> tuple[Path, dict[str, Any]]:
 
     source = WEIGHTS.resolve()
     status = source.stat()
-    if status.st_size <= 0 or status.st_size % 4096 != 0:
-        raise CampaignError("the standard artifact is not a nonempty 4096-byte-aligned file")
+    # The container aligns its payload start, not its total file size.
+    if status.st_size <= 0:
+        raise CampaignError("the standard artifact is empty")
 
     fingerprint = (
         f"{status.st_dev:x}-{status.st_ino:x}-{status.st_size:x}-{status.st_mtime_ns:x}"

@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 
 #include "ops/linear/nvfp4/nvfp4_config.h"
@@ -21,10 +22,10 @@ Nvfp4LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_r
     if (tokens <= 0 || output_rows != 5120 || (input_rows != 6144 && input_rows != 17408)) {
         throw std::invalid_argument("nvfp4 linear_add: unsupported shape");
     }
-    if (policy == LinearPolicy::A16Only) { return Nvfp4LinearAddRoute::A16; }
-    if (policy != LinearPolicy::AllowA4) {
-        throw std::invalid_argument("nvfp4 linear_add: unsupported policy");
+    if (policy == LinearPolicy::A16Only || policy == LinearPolicy::AllowA8) {
+        return Nvfp4LinearAddRoute::A16;
     }
+    if (!allows_a4(policy)) { throw std::invalid_argument("nvfp4 linear_add: unsupported policy"); }
     // MLP down projection consumes the represented A4 activation at every execution width. GDN
     // output keeps one A16 reduction profile across every compact decode batch: at most eight
     // requests times six target-verification columns.
@@ -33,7 +34,7 @@ Nvfp4LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_r
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
-    constexpr std::int32_t kChunk = kNvfp4LastSmallT;
+    constexpr std::int32_t kChunk = 32;
     for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += kChunk) {
         const std::int32_t active = std::min(kChunk, x.ne[1] - token_begin);
         auto* input               = static_cast<std::uint8_t*>(x.data) +

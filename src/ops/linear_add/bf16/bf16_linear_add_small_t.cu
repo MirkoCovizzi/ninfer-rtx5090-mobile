@@ -1,8 +1,9 @@
+#include "core/weight.h"
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
 #include "core/device.h"
 #include "ops/linear/bf16/bf16_config.h"
-#include "ops/linear/bf16/bf16_small_t.cuh"
+#include "ops/linear/bf16/bf16_simt.cuh"
 
 #include <array>
 #include <cstddef>
@@ -35,24 +36,22 @@ struct Bf16LinearAddSmallTProductionSchedule {
     static constexpr int kRowsPerWarp =
         (ActiveTokens == 4 || ActiveTokens == 6) ? 2 : (ActiveTokens <= 8 ? 4 : 2);
     using Type =
-        Bf16SmallTInnerSchedule<4, 1, kRowsPerWarp, 16, 1, 4,
-                                Bf16SmallTActivationAccess::WarpPacked, Bf16WeightCache::Default,
-                                Bf16PhaseOrder::Sequential, 1, 2, 1, 2>;
+        Bf16SimtSchedule<4, 1, kRowsPerWarp, 16, 1, 4, Bf16SimtActivationAccess::WarpPacked,
+                         Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1, 2, 1, 2>;
 };
 
 template <int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
-    using Geometry = Bf16GemvGeometry<5120, 6144>;
+    using Geometry = Bf16Geometry<5120, 6144>;
     using Schedule = typename Bf16LinearAddSmallTProductionSchedule<ActiveTokens>::Type;
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
 
     const Bf16LinearAddSmallTOutput output{static_cast<__nv_bfloat16*>(residual.data),
                                            Geometry::kOutputRows};
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
-    bf16_small_t_inner_kernel<Geometry, ActiveTokens, Schedule>
-        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output);
+    bf16_simt_kernel<Geometry, ActiveTokens, Schedule><<<kBlocks, Schedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.qdata),
+        output);
     CUDA_CHECK(cudaGetLastError());
 }
 

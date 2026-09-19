@@ -61,7 +61,6 @@ profiles/
 .chatgpt/
 
 # Local development directories
-models/
 scripts/
 worktrees/
 

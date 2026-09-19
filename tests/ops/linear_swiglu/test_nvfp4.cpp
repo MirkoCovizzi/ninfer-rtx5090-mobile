@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ops/linear_swiglu/linear_swiglu_test_common.h"
 
 #include <array>
@@ -10,8 +11,11 @@ int main() {
 
     try {
         constexpr std::array<std::int32_t, 4> kA16Cases{1, 4, 8, 16};
-        constexpr std::array<std::int32_t, 18> kA4Cases{1,  2,  3,  4,  5,   16,  48,  49,  56,
-                                                        64, 65, 96, 97, 112, 128, 129, 256, 1024};
+        // 255, 256 and 257 straddle the fused route floor. This change does not move that
+        // route, but 257 reaches it through the baseline composition, whose own linear now
+        // runs the ragged TMA path.
+        constexpr std::array<std::int32_t, 21> kA4Cases{
+            1, 2, 3, 4, 5, 16, 48, 49, 56, 64, 65, 96, 97, 112, 128, 129, 255, 256, 257, 512, 1024};
         int failures = 0;
         failures += run_profile("LinearSwiGLU NVFP4_A16",
                                 {QType::NVFP4, 34816, 5120, 17408, 1801U, ActivationCompute::A16},

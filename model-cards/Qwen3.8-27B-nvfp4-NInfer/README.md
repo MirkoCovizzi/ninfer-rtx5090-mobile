@@ -106,37 +106,36 @@ model-index:
 This model card is the version-controlled source for
 [neroued/Qwen3.8-27B-nvfp4-NInfer](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer).
 
-The repository contains the registered NVFP4 weight profile of
+The repository contains a mixed NVFP4/FP8 representation of
 [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). It combines the official BF16 checkpoint
 with the fixed packed Text weights from
 [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) in the native
 [NInfer](https://github.com/Neroued/ninfer) `.ninfer` artifact format. The artifact is intended
 only for NInfer; it is not a Transformers checkpoint, Safetensors distribution, or GGUF file.
 
-This is a second weight profile for the existing `qwen3_8_27b` target, not a separate model target.
-The version-2 artifact identity selects the NVFP4 binder and execution leaves. The `nvfp4` weights
-ID names the complete registered profile rather than claiming that every matrix has one format:
-Text layers 0–55 use NVFP4 MLP weights, while the token embedding, attention input/output
+The artifact uses the Qwen3.5 Dense architecture. Text layers 0–55 use NVFP4 MLP weights,
+while the token embedding, attention input/output
 projections, GDN Q/K/V/Z and output projections, full output head, and Text layers 56–63 MLP weights
-use row-scaled FP8. BF16 control weights and the registered MTP and Vision allocations are retained.
+use row-scaled FP8. Control weights use BF16, with separate MTP, Vision and DFlash2 weights.
 
 ## Artifact
 
 | Field | Value |
 |---|---|
 | Filename | `qwen3_8_27b_nvfp4.ninfer` |
-| Size | 23,719,496,192 bytes (22.09 GiB) |
-| SHA-256 | `552c374c685dce302603b95fbe940fb04243c0cd44c083efc644ad3d980d462c` |
-| Container version | 2 |
-| NInfer model ID | `qwen3.8-27b` |
-| NInfer weights ID | `nvfp4` |
-| NInfer target key | `qwen3_8_27b` |
-| Stored objects | 1,190 (1,184 tensors and 6 resources) |
+| Size | 23,719,715,844 bytes (22.09 GiB) |
+| SHA-256 | `74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82` |
+| Container version | 3 |
+| Architecture | `Qwen3_5ForCausalLM` |
+| Public model name | `qwen3.8-27b` |
+| Chat template | [qwen3_8.jinja](https://github.com/Neroued/ninfer/blob/98dada0e03cb073fd07f905400b5904bc6e82759/tools/chat_templates/qwen3_8.jinja); override with `--chat-template FILE` |
+| Template defaults | thinking on; effort `xhigh`; closed-turn reasoning retained |
+| Stored objects | 1,246 (1,240 tensors and 6 resources) |
 | NVFP4 tensors | 112 |
 | Row-scaled FP8 tensors | 146 |
 
-The file contains the registered Text, Vision, MTP, DFlash2, optimized proposal-head, tokenizer,
-chat-template, generation, and media-processor objects required by NInfer. Source-derived NVFP4 and
+The file contains Text, Vision, MTP, DFlash2, the optimized proposal head and frontend resources.
+Vision and speculative weights are loaded only when selected at startup. Source-derived NVFP4 and
 FP8 words are preserved without decode and requantization; only the official BF16 token embedding
 is encoded locally as row-scaled FP8.
 
@@ -144,7 +143,7 @@ Verify a downloaded file with:
 
 ```bash
 printf '%s  %s\n' \
-  '552c374c685dce302603b95fbe940fb04243c0cd44c083efc644ad3d980d462c' \
+  '74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82' \
   'qwen3_8_27b_nvfp4.ninfer' | sha256sum --check
 ```
 
@@ -158,11 +157,14 @@ retain their stated MTP configurations and revisions.
 ## Requirements
 
 - [NInfer](https://github.com/Neroued/ninfer) revision
-  [`385b30ce`](https://github.com/Neroued/ninfer/commit/385b30ce1757bafe5a82680e9b5aeb940b14eec1)
+  [`04350ba9`](https://github.com/Neroued/ninfer/commit/98dada0e03cb073fd07f905400b5904bc6e82759)
   or later, built from source;
 - 64-bit Linux;
 - NVIDIA GeForce RTX 5090 (`sm_120a`);
 - CUDA Toolkit 13.1 or newer.
+
+Already have the official v2 file? [Upgrade it locally](https://github.com/Neroued/ninfer/blob/master/docs/weight-conversion.md#upgrade-an-existing-v2-artifact)
+without downloading the weights again.
 
 NInfer does not provide an install target or packaged binary. See the
 [repository README](https://github.com/Neroued/ninfer#quick-start) for source-build dependencies.
@@ -246,7 +248,7 @@ each, for 75 requests. Every concurrency point starts a fresh server and uses th
 and ordered HTTP send sequence. C=1 is the serial single-request corpus. Makespan includes prefill,
 decode, workload transitions, and final drain.
 
-| C | Requests | Decode tokens | Makespan | Requests/s | Decode tok/s | Avg batch | MTP acceptance | Speedup |
+| C | Requests | Decode tokens | Makespan | Requests/s | Corpus decode (tok/s) | Avg batch | MTP acceptance | Speedup |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1 | 75 | 752,160 | 4,670.27 s | 0.0161 | 161.1 | 1.00 | 60.8% | 1.00× |
 | 2 | 75 | 739,951 | 2,510.78 s | 0.0299 | 294.7 | 1.98 | 59.2% | 1.86× |
@@ -264,7 +266,7 @@ decode-token totals are shown above.
 Each value is the arithmetic mean ± sample standard deviation over five fixed seeds after server
 warm-up.
 
-| Prompt tokens | Prefill tok/s | Server TTFT (ms) | Decode tok/s |
+| Prompt tokens | Prefill phase (tok/s) | Server TTFT (ms) | Decode phase (tok/s) |
 |---:|---:|---:|---:|
 | 7,680 | 8,340.4 ± 13.0 | 931.6 ± 1.6 | 71.2 ± 0.1 |
 | 64,512 | 5,297.9 ± 259.2 | 12,281.1 ± 561.5 | 65.7 ± 0.8 |
@@ -276,7 +278,7 @@ warm-up.
 The C=1 point supplies five samples for each fixture. Values are arithmetic mean ± sample standard
 deviation from server phase timings and speculative counters.
 
-| AIME 2026 fixture | Completion tokens | Decode tok/s | MTP acceptance | MTP tokens/round |
+| AIME 2026 fixture | Completion tokens | Decode phase (tok/s) | MTP acceptance | MTP tokens/round |
 |---|---:|---:|---:|---:|
 | Problem 1 | 1,465.4 ± 417.3 | 195.2 ± 4.6 | 76.0% ± 2.4% | 3.28 ± 0.07 |
 | Problem 15 | 65,414.4 ± 271.9 | 151.4 ± 2.0 | 56.2% ± 1.1% | 2.69 ± 0.03 |
@@ -286,7 +288,7 @@ deviation from server phase timings and speculative counters.
 
 Each category contains three fixtures and five seeds per fixture, for 15 samples.
 
-| Category | Decode tok/s | MTP acceptance | MTP tokens/round |
+| Category | Decode phase (tok/s) | MTP acceptance | MTP tokens/round |
 |---|---:|---:|---:|
 | Code | 194.3 ± 6.1 | 76.4% ± 3.9% | 3.29 ± 0.12 |
 | Story | 126.1 ± 10.9 | 37.4% ± 5.8% | 2.12 ± 0.17 |
@@ -294,7 +296,7 @@ Each category contains three fixtures and five seeds per fixture, for 15 samples
 | Structured output | 219.8 ± 8.6 | 90.8% ± 5.1% | 3.72 ± 0.15 |
 
 See the
-[full methodology and results](https://github.com/Neroued/ninfer/blob/master/docs/performance.md)
+[full methodology and results](https://github.com/Neroued/ninfer/blob/master/docs/performance/qwen3.8-27b.md)
 for metric definitions and the exact reproduction command.
 
 ## Evaluation
@@ -326,8 +328,6 @@ AIME results.
 
 ## Limits
 
-- The artifact is accepted only by NInfer revision `385b30ce` or later and the matching registered
-  target.
 - NInfer executes on one RTX 5090 and one CUDA device, with a startup-fixed capacity of 1–8 active
   requests per Engine.
 - It does not provide large-scale or preemptive continuous batching, priority/QoS scheduling,
@@ -344,17 +344,16 @@ AIME results.
 | Base download source | `modelscope.cn/models/Qwen/Qwen3.8-27B` |
 | Quantized source repository | `unsloth/Qwen3.8-27B-NVFP4` |
 | Quantized source revision | `60e813d4dbbdc5d64cf3f5a8caf2897bedf03679` |
-| Conversion recipe | `qwen3_8_27b_nvfp4-v2` |
-| Embedding encoder | `MAXABS_BF16S_RECIP_E4M3FN_RNE_V1` |
+| Conversion recipe | `qwen3_8_27b_nvfp4` |
+| Embedding encoder | `fp8_row_maxabs` |
 | Converter repository | `https://github.com/Neroued/ninfer` |
-| Converter revision | `863aa8a5f1e866db74f29f8999b83b4021398dee` |
-| Minimum runtime revision | `385b30ce1757bafe5a82680e9b5aeb940b14eec1` |
+| Minimum runtime revision | `98dada0e03cb073fd07f905400b5904bc6e82759` |
 | Ranking input SHA-256 | `c692dc76388132c910547589b4fb4a0503fbd6ad50aaac6a509bbcb192a8afa5` |
 
 The artifact identity, summarized object inventory, and conversion provenance are published in
 [`artifact-manifest.json`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer/blob/main/artifact-manifest.json).
 The exact storage contract is maintained in the
-[Qwen3.8-27B artifact reference](https://github.com/Neroued/ninfer/blob/master/docs/maintainer/qwen3.8-27b-artifact.md).
+[v3 container reference](https://github.com/Neroued/ninfer/blob/master/docs/maintainer/artifact-container.md).
 
 ## License
 

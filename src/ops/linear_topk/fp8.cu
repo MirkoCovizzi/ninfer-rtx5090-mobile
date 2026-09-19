@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ops/linear_topk/linear_topk_launch.h"
 
 #include "core/device.h"
@@ -21,7 +22,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_groupe
     const __nv_bfloat16* __restrict__ hidden, const std::uint8_t* __restrict__ weight_codes,
     const __nv_bfloat16* __restrict__ row_scales, std::int32_t valid_rows,
     std::uint64_t* __restrict__ partial_keys, std::int32_t producer_groups, int columns) {
-    constexpr int kHidden    = Fp8VocabularyGeometry::kInputRows;
+    constexpr int kHidden    = Fp8N248320K5120::kInputRows;
     constexpr int kTileK     = Schedule::kTileKPerWarp;
     constexpr int kWarps     = Schedule::kKWarps;
     constexpr int kRows      = Schedule::kRowsPerCta;
@@ -222,7 +223,7 @@ using Launch = void (*)(const Tensor&, const Weight&, std::int32_t, const Linear
 template <int Capacity>
 void launch_tile(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                  const LinearTopKWorkspace& workspace, cudaStream_t stream) {
-    using Schedule = Fp8A16SmallTMmaSchedule<8, Capacity, 2>;
+    using Schedule = Fp8A16KSplitSchedule<8, Capacity, 2>;
     fp8_grouped_ksplit_topk_kernel<Capacity, Schedule>
         <<<workspace.producer_groups, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(hidden.data),

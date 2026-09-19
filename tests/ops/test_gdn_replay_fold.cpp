@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/gdn_replay.h"
@@ -522,9 +523,9 @@ int run_record_fold_rounds() {
     constexpr float kScale               = 1.0F / std::sqrt(128.0F);
 
     DevicePackedWeight qk_parent(
-        quantized_weight::make_patterned_weight(QType::Q4G64_F16S, 4096, kHidden, 1901U));
+        quantized_weight::make_patterned_weight(QType::Q4_G64_FP16, 4096, kHidden, 1901U));
     DevicePackedWeight vz_parent(
-        quantized_weight::make_patterned_weight(QType::Q5G64_F16S, 12288, kHidden, 1902U));
+        quantized_weight::make_patterned_weight(QType::Q5_G64_FP16, 12288, kHidden, 1902U));
     const std::vector<float> activation = make_bf16_activation(kHidden, kWidth, 1903U);
     DeviceBuffer device_x               = to_device_bf16(activation);
     std::vector<std::uint16_t> conv_weight_bits(static_cast<std::size_t>(kProfile.conv_channels) *
