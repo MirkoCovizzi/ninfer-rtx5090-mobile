@@ -2,6 +2,7 @@
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
 
 #include "core/device.h"
+#include "ops/kv_cache/append/launch.h"
 #include "ops/common/math.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cuh"
 
@@ -23,7 +24,8 @@ void launch_nvfp4_partial(const Tensor& q, CacheInput input, const Tensor& posit
     constexpr int MinBlocks            = RowTiles <= 2 ? 2 : 1;
     constexpr std::size_t DynamicBytes = (RowTiles <= 2 ? 3u : 5u) * KeyBlock * kCausalHeadDim;
     using KernelInput                  = CacheInput;
-    const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
+    const int query_tiles              = TokenTile == 1 ? invocation.width : 1;
+    const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size * query_tiles);
     const auto launch = [&]() {
         auto kernel = causal_attention_small_t_nvfp4_tiled_kernel<
             Geometry, TokenTile, Warps, MinBlocks, KeyBlock, true, MultiBatch, Masked, KernelInput>;
@@ -51,8 +53,8 @@ void launch_nvfp4_partial(const Tensor& q, CacheInput input, const Tensor& posit
         kernel<<<grid, Warps * 32, DynamicBytes, stream>>>(
             q_ptr, input, positions_ptr, cache_k_ptr, cache_v_ptr, k_scale_ptr, v_scale_ptr,
             tables_ptr, valid_ptr, rows_ptr, cache.block_tables.ne[0], invocation.full_width,
-            invocation.column_begin, logical_capacity, scale, partial_acc_ptr, partial_m_ptr,
-            partial_l_ptr);
+            invocation.column_begin, query_tiles, logical_capacity, scale, partial_acc_ptr,
+            partial_m_ptr, partial_l_ptr);
         CUDA_CHECK(cudaGetLastError());
     };
 
@@ -118,22 +120,13 @@ void causal_attention_small_t_nvfp4_launch_for(
 
     switch (invocation.width) {
     case 1:
-        dispatch_metadata.template operator()<1>();
-        break;
     case 2:
-        dispatch_metadata.template operator()<2>();
-        break;
     case 3:
-        dispatch_metadata.template operator()<3>();
-        break;
     case 4:
-        dispatch_metadata.template operator()<4>();
-        break;
     case 5:
-        dispatch_metadata.template operator()<5>();
-        break;
     case 6:
-        dispatch_metadata.template operator()<6>();
+        // Independent query CTAs retain ordinary-decode arithmetic in one batched launch.
+        dispatch_metadata.template operator()<1>();
         break;
     case 7:
         if constexpr (Geometry::QHeads == 24) {
@@ -176,8 +169,6 @@ void causal_attention_small_t_nvfp4_launch(
     const Tensor& valid_columns, const Tensor& table_rows, float scale, PagedKVBatchLayerView cache,
     CausalAttentionExecutionEnvelope envelope, std::int32_t column_begin, std::int32_t width,
     Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l, Tensor& out, cudaStream_t stream) {
-    const CausalAppendInput input{static_cast<const __nv_bfloat16*>(k.data),
-                                  static_cast<const __nv_bfloat16*>(v.data)};
     const CausalSmallTInvocation invocation{
         .valid_columns = valid_columns.data == nullptr ? nullptr : &valid_columns,
         .table_rows    = &table_rows,
@@ -186,15 +177,24 @@ void causal_attention_small_t_nvfp4_launch(
         .width         = width,
         .batch_size    = q.ne[3],
     };
-    if (q.ne[1] == CausalD256H24Kv4::QHeads) {
-        causal_attention_small_t_nvfp4_launch_for<CausalD256H24Kv4>(
+    const auto launch = [&](auto input) {
+        if (q.ne[1] == CausalD256H24Kv4::QHeads) {
+            causal_attention_small_t_nvfp4_launch_for<CausalD256H24Kv4>(
+                q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
+                partial_l, out, stream);
+            return;
+        }
+        causal_attention_small_t_nvfp4_launch_for<CausalD256H16Kv2>(
             q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
             partial_l, out, stream);
-        return;
+    };
+    if (width > 1 && width <= 6) {
+        kv_cache_append_batch_launch(k, v, positions, valid_columns, table_rows, cache, stream);
+        launch(CausalCachedInput{});
+    } else {
+        launch(CausalAppendInput{static_cast<const __nv_bfloat16*>(k.data),
+                                 static_cast<const __nv_bfloat16*>(v.data)});
     }
-    causal_attention_small_t_nvfp4_launch_for<CausalD256H16Kv2>(q, input, positions, scale, cache,
-                                                                invocation, envelope, partial_acc,
-                                                                partial_m, partial_l, out, stream);
 }
 
 void causal_attention_cached_small_t_nvfp4_launch(const Tensor& q, const Tensor& positions,

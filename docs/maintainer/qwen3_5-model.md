@@ -253,12 +253,15 @@ An optional proposal head supplies an indexed vocabulary subset for draft predic
 converts proposal rows to actual token IDs. Full target verification continues to use the full
 output head. Backend selection, draft width and proposal-head choice are fixed at startup.
 
-For BF16/INT8 KV, the fork additionally requires exact committed-token parity between ordinary
-greedy decode and MTP draft windows 1..5 with the same artifact, prepared prompt and otherwise
-identical configuration. This does not require bit-identical private intermediates. Stochastic
-execution preserves the processed target distribution but need not reproduce a fixed seed's
-token sequence across backends. KVarN's raw-current-step lifetime instead uses the
-[same-schedule state and numerical criteria](paged-kv-cache.md#kvarn-record-and-tail-semantics).
+For every supported Main KV profile (BF16, INT8, FP8, NVFP4, K8V4 and KVarN), the fork requires
+exact committed-token parity between ordinary greedy decode and MTP draft windows 1..5 with the
+same artifact, prepared prompt and otherwise identical configuration. This does not require
+bit-identical private intermediates. Narrow target attention uses per-query arithmetic independent
+of speculative width and compact batch membership. KVarN verification ends at a quantization-group
+boundary so publication encodes completed history before a query in the next group; see
+[KVarN state semantics](paged-kv-cache.md#kvarn-record-and-tail-semantics). Stochastic execution
+preserves the processed target distribution but need not reproduce a fixed seed's token sequence
+across backends.
 
 ## Vision and multimodal positions
 

@@ -4,6 +4,7 @@
 #include "models/qwen3_5/program/graph_execution.h"
 #include "core/nvtx.h"
 #include "core/device.h"
+#include "ninfer/ops/kvarn.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scatter.h"
@@ -463,9 +464,15 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
-            const std::uint32_t extent =
-                std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
-                          capacity - sequence.execution_frontier - 1});
+            std::uint32_t extent = std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
+                                             capacity - sequence.execution_frontier - 1});
+            // A completed KVarN group changes representation at publication. Do not verify a
+            // query in the next group against the still-raw speculative tail: ordinary decode
+            // would already see that history encoded. The anchor consumes one valid column.
+            if (kv_storage == KvCacheStorage::KvarnK4V2Group128) {
+                constexpr auto group = static_cast<std::uint32_t>(ops::kKvarnGroup);
+                extent               = std::min(extent, group - 1U - frontier % group);
+            }
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
             mtp_host_ingress->remaining_budgets[row] =

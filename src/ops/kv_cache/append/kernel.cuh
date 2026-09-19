@@ -111,6 +111,11 @@ __launch_bounds__(256) __global__
                                          std::uint8_t* __restrict__ cache_v,
                                          __half* __restrict__ scale_k, __half* __restrict__ scale_v,
                                          std::int32_t width) {
+    const auto row = static_cast<std::int64_t>(blockIdx.z);
+    metadata       = metadata.for_row(static_cast<int>(row));
+    k += row * width * 256 * Geometry::KVHeads;
+    v += row * width * 256 * Geometry::KVHeads;
+    positions += row * width;
     constexpr int Warps         = 8;
     constexpr unsigned FullMask = 0xffffffffU;
     const int tokens            = metadata.valid_tokens(width);
@@ -139,6 +144,11 @@ __launch_bounds__(256) __global__
                                               std::uint8_t* __restrict__ cache_v,
                                               __half* __restrict__ scale_k,
                                               __half* __restrict__ scale_v, std::int32_t width) {
+    const auto row = static_cast<std::int64_t>(blockIdx.z);
+    metadata       = metadata.for_row(static_cast<int>(row));
+    k += row * width * 256 * Geometry::KVHeads;
+    v += row * width * 256 * Geometry::KVHeads;
+    positions += row * width;
     constexpr int TokensPerTile = 8;
     constexpr unsigned FullMask = 0xffffffffU;
     const int tokens            = metadata.valid_tokens(width);

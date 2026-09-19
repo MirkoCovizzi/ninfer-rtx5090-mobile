@@ -346,9 +346,9 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
                                                     std::int32_t batch_size, KvCacheStorage storage,
                                                     CausalAttentionExecutionEnvelope envelope) {
     // Decode and MTP keep one arithmetic profile regardless of the active batch width.
-    if (width <= 6 && storage == KvCacheStorage::BFloat16) return CausalAttentionRoute::SmallT;
     if (width <= 6 && storage == KvCacheStorage::Int8Group64)
         return width == 1 ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
+    if (width <= 6) return CausalAttentionRoute::SmallT;
     if (q_heads == 24 && width <= kMaximumVerifyTokens) {
         if (batch_size == 1) {
             std::uint32_t prompt_limit = 0;

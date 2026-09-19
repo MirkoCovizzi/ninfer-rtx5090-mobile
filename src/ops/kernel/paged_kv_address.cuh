@@ -14,6 +14,8 @@ static_assert(kPagedKVPageSize == (1 << kPagedKVPageShift));
 struct PagedKVDirectMetadata {
     const std::int32_t* table;
 
+    __device__ __forceinline__ PagedKVDirectMetadata for_row(int) const { return *this; }
+
     __device__ __forceinline__ std::int32_t valid_tokens(std::int32_t width) const { return width; }
 
     __device__ __forceinline__ const std::int32_t* block_table() const { return table; }
@@ -25,6 +27,10 @@ struct PagedKVBatchMetadata {
     const std::int32_t* valid_columns;
     const std::int32_t* table_rows;
     std::int32_t table_stride;
+
+    __device__ __forceinline__ PagedKVBatchMetadata for_row(int row) const {
+        return {tables, Masked ? valid_columns + row : nullptr, table_rows + row, table_stride};
+    }
 
     __device__ __forceinline__ std::int32_t valid_tokens(std::int32_t width) const {
         if constexpr (Masked) {

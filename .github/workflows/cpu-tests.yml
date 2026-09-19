@@ -29,7 +29,15 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.7.1"
           python -m pip install -r tests/requirements-cpu.txt
 
-      - name: Run CPU tests
+      - name: Build native text tests
         run: |
+          cmake -S tests/text -B build/cpu-text -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/cpu-text -j
+
+      - name: Run CPU tests
+        env:
+          NINFER_JINJA_TEST: ${{ github.workspace }}/build/cpu-text/ninfer_jinja_test
+        run: |
+          ctest --test-dir build/cpu-text --output-on-failure
           python -m pytest tests
           PYTHONPATH=eval python -m unittest discover -s eval/tests -p 'test_*.py'

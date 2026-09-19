@@ -15,11 +15,8 @@
 
 namespace {
 
-constexpr std::uint32_t kOutputTokens = 128;
-constexpr std::array<std::uint32_t, 5> kMtpDraftCounts{1, 2, 3, 4, 5};
+constexpr std::uint32_t kOutputTokens       = 512;
 constexpr std::uint32_t kMaximumConcurrency = 8;
-constexpr std::array<std::uint32_t, 8> kConcurrencyFrontiers{1, 2, 3, 4,
-                                                             5, 6, 7, kMaximumConcurrency};
 
 struct KvProfile {
     std::string_view name;
@@ -29,6 +26,10 @@ struct KvProfile {
 constexpr std::array kKvProfiles{
     KvProfile{"bf16", ninfer::KvCacheStorage::BFloat16},
     KvProfile{"int8", ninfer::KvCacheStorage::Int8Group64},
+    KvProfile{"fp8", ninfer::KvCacheStorage::Fp8E4M3Row256},
+    KvProfile{"nvfp4", ninfer::KvCacheStorage::Nvfp4Group16},
+    KvProfile{"k8v4", ninfer::KvCacheStorage::Fp8KeyNvfp4Value},
+    KvProfile{"kvarn", ninfer::KvCacheStorage::KvarnK4V2Group128},
 };
 
 ninfer::EngineOptions engine_options(const char* artifact, ninfer::KvCacheStorage kv_storage,
@@ -75,22 +76,6 @@ ninfer::PromptInput prompt() {
     return input;
 }
 
-std::vector<ninfer::TokenId> generate(const char* artifact, ninfer::KvCacheStorage kv_storage,
-                                      std::uint32_t mtp_draft_tokens) {
-    const std::string route =
-        mtp_draft_tokens == 0 ? "ordinary" : "MTP k=" + std::to_string(mtp_draft_tokens);
-    try {
-        ninfer::Engine engine(engine_options(artifact, kv_storage, mtp_draft_tokens));
-        ninfer::GenerationResult result =
-            engine.generate(engine.prepare(prompt()), greedy_request());
-        if (result.generated_token_ids.size() != kOutputTokens ||
-            result.finish_reason != ninfer::FinishReason::OutputLimit) {
-            throw std::runtime_error("did not reach its fixed output limit");
-        }
-        return result.generated_token_ids;
-    } catch (const std::exception& error) { throw std::runtime_error(route + ": " + error.what()); }
-}
-
 void verify_result(std::string_view label, const ninfer::GenerationResult& result,
                    const std::vector<ninfer::TokenId>& expected) {
     const auto& actual = result.generated_token_ids;
@@ -109,48 +94,12 @@ void verify_result(std::string_view label, const ninfer::GenerationResult& resul
     }
 }
 
-void verify_batch(ninfer::Engine& engine, KvProfile profile, std::uint32_t draft_tokens,
-                  std::uint32_t concurrency, std::uint32_t iteration,
-                  const std::vector<ninfer::TokenId>& expected) {
-    std::vector<ninfer::PreparedPrompt> prompts;
-    prompts.reserve(concurrency);
-    for (std::uint32_t row = 0; row < concurrency; ++row) {
-        prompts.push_back(engine.prepare(prompt()));
-    }
-    std::vector<ninfer::GenerationHandle> handles;
-    handles.reserve(concurrency);
-    for (std::uint32_t row = 0; row < concurrency; ++row) {
-        handles.push_back(engine.submit(std::move(prompts[row]), greedy_request()));
-    }
-    for (std::uint32_t row = 0; row < concurrency; ++row) {
-        const std::string label =
-            std::string(profile.name) + " MTP k=" + std::to_string(draft_tokens) +
-            " C=" + std::to_string(concurrency) + " iteration=" + std::to_string(iteration) +
-            " row=" + std::to_string(row);
-        verify_result(label, handles[row].wait(), expected);
-    }
-}
-
-void verify_route(const char* artifact, KvProfile profile, std::uint32_t draft_tokens,
-                  const std::vector<ninfer::TokenId>& expected,
-                  std::uint32_t selected_concurrency = 0) {
-    ninfer::Engine engine(
-        engine_options(artifact, profile.storage, draft_tokens, kMaximumConcurrency));
-    for (const std::uint32_t concurrency : kConcurrencyFrontiers) {
-        if (selected_concurrency != 0 && concurrency != selected_concurrency) continue;
-        verify_batch(engine, profile, draft_tokens, concurrency, 0, expected);
-        if (concurrency == kMaximumConcurrency) {
-            verify_batch(engine, profile, draft_tokens, concurrency, 1, expected);
-        }
-    }
-}
-
-struct KvarnCases {
+struct ParityCases {
     ninfer::SpeculativeBackend backend = ninfer::SpeculativeBackend::Mtp;
-    std::uint32_t output_tokens        = 8192;
+    std::uint32_t output_tokens        = kOutputTokens;
     std::uint32_t prefill_chunk        = 1024;
     std::uint32_t concurrency          = 1;
-    int sample                         = -1;
+    int sample                         = 0;
     int depth                          = -1;
     bool graphs                        = true;
     bool prefix_reuse                  = false;
@@ -158,7 +107,7 @@ struct KvarnCases {
     std::vector<ninfer::TokenId> corpus;
 };
 
-void verify_kvarn(const char* artifact, const KvarnCases& cases) {
+void verify_parity(const char* artifact, KvProfile profile, const ParityCases& cases) {
     constexpr std::array<std::uint32_t, 5> long_contexts{8190, 32799, 122879, 196607, 245743};
     const int samples = cases.corpus.empty() ? 3 : 8;
     if (cases.sample >= samples) { throw std::invalid_argument("long samples require --corpus"); }
@@ -168,18 +117,18 @@ void verify_kvarn(const char* artifact, const KvarnCases& cases) {
                                                   ? std::vector<std::uint32_t>{0, 1, 3, 7, 15}
                                                   : std::vector<std::uint32_t>{0, 3, 1, 2, 4, 5};
     for (std::uint32_t depth : depths) {
-        if (cases.depth >= 0 && depth != cases.depth) { continue; }
-        // Huawei's committed-group flush policy is step-dependent. Compare fresh executions of
-        // the same backend, not different speculative widths with different raw-tail lifetimes.
+        if (depth != 0 && cases.depth >= 0 && depth != cases.depth) { continue; }
+        // Every MTP width and fresh repeat uses ordinary greedy as oracle. DFlash retains its
+        // same-width repeatability check; its wider target arithmetic has a separate contract.
         for (int repeat = 0; repeat < 2; ++repeat) {
-            auto options = engine_options(artifact, ninfer::KvCacheStorage::KvarnK4V2Group128,
-                                          depth, cases.concurrency);
+            auto options = engine_options(artifact, profile.storage, depth, cases.concurrency);
             options.speculative.backend =
                 depth == 0 ? ninfer::SpeculativeBackend::None : cases.backend;
-            const auto prompt_capacity =
-                cases.sample < 0 ? (samples == 8 ? long_contexts.back() : 4096U)
-                                 : (cases.sample >= 3 ? long_contexts[cases.sample - 3] : 4096U);
-            options.max_context    = cases.output_tokens + prompt_capacity + 16;
+            const auto prompt_capacity = cases.sample >= 3 ? long_contexts[cases.sample - 3]
+                                                           : (cases.sample == 0   ? 128U
+                                                              : cases.sample == 1 ? 1024U
+                                                                                  : 4096U);
+            options.max_context        = cases.output_tokens + prompt_capacity + 16;
             options.kv_capacity    = ninfer::KvCapacityPolicy::explicit_capacity(cases.concurrency *
                                                                                  options.max_context);
             options.prefill_chunk  = cases.prefill_chunk;
@@ -197,18 +146,27 @@ void verify_kvarn(const char* artifact, const KvarnCases& cases) {
             for (int sample = 0; sample < samples; ++sample) {
                 if (cases.sample >= 0 && sample != cases.sample) { continue; }
                 const auto prepare = [&](std::uint32_t row) {
+                    const auto raw_prompt = [&](std::vector<ninfer::TokenId> tokens) {
+                        // Distinct branches keep every prewarmed endpoint resident. Nested raw
+                        // prefixes otherwise extend one continuation and replace its endpoint.
+                        if (row > 0) {
+                            const auto label =
+                                engine.tokenize_text("Request " + std::to_string(row) + ":\n");
+                            std::copy(label.begin(), label.end(), tokens.begin());
+                        }
+                        return engine.prepare_tokens(std::move(tokens));
+                    };
                     if (sample >= 3) {
                         const auto length = long_contexts[sample - 3] - 7 * row;
                         if (cases.corpus.size() < length) {
                             throw std::invalid_argument(
                                 "corpus is shorter than the selected prompt");
                         }
-                        return engine.prepare_tokens(std::vector<ninfer::TokenId>(
+                        return raw_prompt(std::vector<ninfer::TokenId>(
                             cases.corpus.begin(), cases.corpus.begin() + length));
                     }
                     if (sample == 2) {
-                        return engine.prepare_tokens(
-                            std::vector<ninfer::TokenId>(2110 + 31 * row, 198));
+                        return raw_prompt(std::vector<ninfer::TokenId>(2110 + 31 * row, 198));
                     }
                     auto input = prompt();
                     if (sample == 1) {
@@ -235,7 +193,7 @@ void verify_kvarn(const char* artifact, const KvarnCases& cases) {
                     for (std::uint32_t row = 0; row < cases.concurrency; ++row) {
                         const auto warm = engine.generate(prepare(row), warm_request);
                         if (warm.generated_token_ids.size() != 1) {
-                            throw std::runtime_error("KVarN prefix prewarm failed");
+                            throw std::runtime_error("prefix prewarm failed");
                         }
                         warm_tokens.push_back(warm.generated_token_ids.front());
                     }
@@ -243,8 +201,9 @@ void verify_kvarn(const char* artifact, const KvarnCases& cases) {
                 const auto before = engine.runtime_stats();
                 std::vector<std::uint32_t> prompt_tokens;
                 std::vector<ninfer::GenerationHandle> handles;
-                std::cout << "starting kvarn spec=" << (dflash2 ? "dflash2" : "mtp")
-                          << " k=" << depth << " sample=" << sample << " C=" << cases.concurrency
+                std::cout << "starting " << profile.name
+                          << " spec=" << (dflash2 ? "dflash2" : "mtp") << " k=" << depth
+                          << " sample=" << sample << " C=" << cases.concurrency
                           << " output=" << cases.output_tokens << " prefill=" << cases.prefill_chunk
                           << " graphs=" << cases.graphs << " prefix=" << cases.prefix_reuse
                           << " repeat=" << repeat << std::endl;
@@ -256,11 +215,11 @@ void verify_kvarn(const char* artifact, const KvarnCases& cases) {
                     handles.push_back(engine.submit(std::move(prepared), row_request));
                 }
                 for (std::uint32_t row = 0; row < cases.concurrency; ++row) {
-                    const auto result       = handles[row].wait();
-                    const std::string label = "kvarn k=" + std::to_string(depth) +
-                                              " sample=" + std::to_string(sample) +
-                                              " row=" + std::to_string(row) +
-                                              " prompt=" + std::to_string(prompt_tokens[row]);
+                    const auto result = handles[row].wait();
+                    const std::string label =
+                        std::string(profile.name) + " k=" + std::to_string(depth) +
+                        " sample=" + std::to_string(sample) + " row=" + std::to_string(row) +
+                        " prompt=" + std::to_string(prompt_tokens[row]);
                     if (result.generated_token_ids.size() != cases.output_tokens - row) {
                         throw std::runtime_error(label +
                                                  " did not reach the requested decode length");
@@ -276,7 +235,9 @@ void verify_kvarn(const char* artifact, const KvarnCases& cases) {
                             label + " did not restore the prewarmed frontier: reused=" +
                             std::to_string(result.reused_prompt_tokens));
                     }
-                    if (repeat == 0) { expected[sample][row] = result.generated_token_ids; }
+                    if ((depth == 0 || dflash2) && repeat == 0) {
+                        expected[sample][row] = result.generated_token_ids;
+                    }
                     verify_result(label, result, expected[sample][row]);
                     std::cout << label << " matched " << expected[sample][row].size()
                               << " tokens reused=" << result.reused_prompt_tokens << std::endl;
@@ -284,8 +245,7 @@ void verify_kvarn(const char* artifact, const KvarnCases& cases) {
                 const auto after = engine.runtime_stats();
                 if (cases.concurrency > 1 && after.decode_row_rounds - before.decode_row_rounds <=
                                                  after.decode_rounds - before.decode_rounds) {
-                    throw std::runtime_error(
-                        "KVarN concurrent case did not execute a compact batch");
+                    throw std::runtime_error("concurrent case did not execute a compact batch");
                 }
             }
         }
@@ -302,15 +262,11 @@ int main(int argc, char** argv) {
     }
 
     try {
-        bool kvarn_only = false;
-        KvarnCases cases;
+        ParityCases cases;
         std::string_view selected_kv;
-        unsigned selected_concurrency = 0;
         for (int index = 1; index < argc; ++index) {
             const std::string_view argument(argv[index]);
-            if (argument == "--kvarn-repeatability") {
-                kvarn_only = true;
-            } else if (argument == "--spec" && index + 1 < argc) {
+            if (argument == "--spec" && index + 1 < argc) {
                 const std::string_view backend(argv[++index]);
                 if (backend == "dflash2") {
                     cases.backend = ninfer::SpeculativeBackend::DFlash2;
@@ -340,16 +296,16 @@ int main(int argc, char** argv) {
                     cases.prefill_chunk = number;
                 } else if (argument == "--concurrency" && number >= 1 &&
                            number <= kMaximumConcurrency) {
-                    cases.concurrency    = number;
-                    selected_concurrency = number;
+                    cases.concurrency = number;
                 } else {
                     throw std::invalid_argument("out of range: " + std::string(argument));
                 }
             } else if (argument == "--kv-dtype" && index + 1 < argc) {
                 selected_kv = argv[++index];
-                if (selected_kv != "bf16" && selected_kv != "int8") {
+                if (std::none_of(kKvProfiles.begin(), kKvProfiles.end(),
+                                 [&](KvProfile profile) { return profile.name == selected_kv; })) {
                     throw std::invalid_argument(
-                        "--kv-dtype requires bf16 or int8; use --kvarn-repeatability for KVarN");
+                        "--kv-dtype requires bf16, int8, fp8, nvfp4, k8v4 or kvarn");
                 }
             } else if (argument == "--no-cuda-graph") {
                 cases.graphs = false;
@@ -366,38 +322,26 @@ int main(int argc, char** argv) {
                 }
             } else {
                 throw std::invalid_argument(
-                    "usage: mtp_greedy_parity_real_test [--kvarn-repeatability] "
+                    "usage: mtp_greedy_parity_real_test "
                     "[--output-tokens 128..16384] [--sample 0..7] "
                     "[--spec mtp|dflash2] [--draft-tokens K] [--prefill-chunk 1..4096] "
                     "[--concurrency 1..8] [--full-proposal-head] "
-                    "[--kv-dtype bf16|int8] "
+                    "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|kvarn] "
                     "[--no-cuda-graph] [--prefix-reuse] [--corpus PATH]");
             }
         }
         if (cases.backend == ninfer::SpeculativeBackend::DFlash2) {
-            if (!kvarn_only || !selected_kv.empty() ||
-                (cases.depth >= 0 && cases.depth != 1 && cases.depth != 3 && cases.depth != 7 &&
-                 cases.depth != 15)) {
-                throw std::invalid_argument(
-                    "DFlash2 requires --kvarn-repeatability and K=1,3,7,15");
+            if (cases.depth >= 0 && cases.depth != 1 && cases.depth != 3 && cases.depth != 7 &&
+                cases.depth != 15) {
+                throw std::invalid_argument("DFlash2 requires K=1,3,7,15");
             }
         } else if (cases.depth > 5) {
             throw std::invalid_argument("MTP requires K=1..5");
         }
-        if (!kvarn_only)
-            for (const KvProfile profile : kKvProfiles) {
-                if (!selected_kv.empty() && profile.name != selected_kv) { continue; }
-                const std::vector<ninfer::TokenId> ordinary =
-                    generate(artifact, profile.storage, 0);
-                verify_route(artifact, profile, 0, ordinary, selected_concurrency);
-                for (const std::uint32_t draft_tokens : kMtpDraftCounts) {
-                    if (cases.depth >= 0 && draft_tokens != static_cast<unsigned>(cases.depth)) {
-                        continue;
-                    }
-                    verify_route(artifact, profile, draft_tokens, ordinary, selected_concurrency);
-                }
-            }
-        if (selected_kv.empty()) { verify_kvarn(artifact, cases); }
+        for (const KvProfile profile : kKvProfiles) {
+            if (!selected_kv.empty() && profile.name != selected_kv) { continue; }
+            verify_parity(artifact, profile, cases);
+        }
     } catch (const std::exception& error) {
         std::cerr << "greedy MTP parity test failed: " << error.what() << '\n';
         return 1;

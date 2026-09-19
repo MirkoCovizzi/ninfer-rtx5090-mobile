@@ -33,8 +33,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         std::uint8_t* cache_v_scale, const std::int32_t* block_tables,
         const std::int32_t* valid_columns, const std::int32_t* table_rows,
         std::int32_t table_stride, std::int32_t full_width, std::int32_t column_begin,
-        std::int32_t logical_capacity, float attention_scale, float* partial_acc, float* partial_m,
-        float* partial_l) {
+        std::int32_t query_tiles, std::int32_t logical_capacity, float attention_scale,
+        float* partial_acc, float* partial_m, float* partial_l) {
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
@@ -79,9 +79,11 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     __shared__ __align__(16) std::uint8_t v_scale_s[Bc * kKVCacheNvfp4Groups];
     __shared__ std::int32_t physical_pages_s[PageIds];
 
-    const int kv_head     = static_cast<int>(blockIdx.x);
-    const int split       = static_cast<int>(blockIdx.y);
-    const int batch       = MultiBatch ? static_cast<int>(blockIdx.z) : 0;
+    const int kv_head    = static_cast<int>(blockIdx.x);
+    const int split      = static_cast<int>(blockIdx.y);
+    const int query_tile = static_cast<int>(blockIdx.z) % query_tiles;
+    const int batch      = MultiBatch ? static_cast<int>(blockIdx.z) / query_tiles : 0;
+    column_begin += query_tile;
     const int split_count = static_cast<int>(gridDim.y);
     const int tid         = static_cast<int>(threadIdx.x);
     const int warp        = tid >> 5;
@@ -103,12 +105,10 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     const int table_row = table_rows == nullptr ? 0 : table_rows[batch];
     const std::int32_t* block_table =
         block_tables + static_cast<std::int64_t>(table_row) * table_stride;
-    if constexpr (MultiBatch) {
-        partial_acc +=
-            static_cast<std::int64_t>(batch) * D * Geometry::QHeads * TokenTile * split_count;
-        partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * TokenTile * split_count;
-        partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * TokenTile * split_count;
-    }
+    const auto partial_row = static_cast<std::int64_t>(batch * query_tiles + query_tile);
+    partial_acc += partial_row * D * Geometry::QHeads * TokenTile * split_count;
+    partial_m += partial_row * Geometry::QHeads * TokenTile * split_count;
+    partial_l += partial_row * Geometry::QHeads * TokenTile * split_count;
 
     auto write_neutral = [&]() {
         for (int row = tid; row < RowCount; row += Threads) {
@@ -618,8 +618,9 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_nvfp4_reduce_out
     }
     if constexpr (Offset) positions += column_begin;
     if constexpr (MultiBatch) positions += static_cast<std::int64_t>(batch) * full_width;
-    const int window  = positions[tokens - 1] + 1;
-    int output_column = token;
+    const bool independent = tokens <= 6;
+    const int window       = positions[independent ? token : tokens - 1] + 1;
+    int output_column      = token;
     if constexpr (Offset) output_column += column_begin;
     if constexpr (MultiBatch) output_column += batch * full_width;
     if constexpr (Masked) {
@@ -632,7 +633,14 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_nvfp4_reduce_out
     }
 
 
-    if constexpr (MultiBatch) {
+    if (independent) {
+        const auto query = static_cast<std::int64_t>(batch) * tokens + token;
+        partial_acc += query * kCausalHeadDim * Geometry::QHeads * split_count;
+        partial_m += query * Geometry::QHeads * split_count;
+        partial_l += query * Geometry::QHeads * split_count;
+        token  = 0;
+        tokens = 1;
+    } else if constexpr (MultiBatch) {
         partial_acc += static_cast<std::int64_t>(batch) * kCausalHeadDim * Geometry::QHeads *
                        tokens * split_count;
         partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;

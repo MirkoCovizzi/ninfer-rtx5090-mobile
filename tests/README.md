@@ -51,6 +51,21 @@ After building, `ctest --preset dev` runs the same CTest suite. See
 
 The chat-template reference test uses Python Jinja2.
 
+On CPU-only machines, build the native renderer without the CUDA/media dependencies before running
+the Python suite (with `tests/requirements-cpu.txt` and CPU PyTorch installed):
+
+```bash
+cmake -S tests/text -B build/cpu-text -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpu-text -j
+ctest --test-dir build/cpu-text --output-on-failure
+NINFER_JINJA_TEST="$PWD/build/cpu-text/ninfer_jinja_test" python3.11 -m pytest tests
+PYTHONPATH=eval python3.11 -m unittest discover -s eval/tests -p 'test_*.py'
+```
+
+`NINFER_JINJA_TEST` selects the renderer for pytest. The regular CTest registration passes its built
+renderer explicitly; a missing renderer is an error, so the independent C++/Python comparison is
+also exercised by CPU CI.
+
 Run a focused target for a localized change:
 
 ```bash
@@ -137,7 +152,7 @@ NINFER_TEST_ARTIFACT=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 The fork's greedy-MTP regression compares committed token IDs against ordinary decode for
-BF16/INT8 KV, draft counts 1..5, and concurrency 1..8:
+BF16, INT8, FP8, NVFP4, K8V4 and KVarN KV, draft counts 1..5, and selected concurrency 1..8:
 
 ```bash
 NINFER_TEST_ARTIFACT=/path/to/qwen3_8_27b_nvfp4.ninfer \
@@ -145,18 +160,22 @@ NINFER_TEST_ARTIFACT=/path/to/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 For a focused reproduction, use `--draft-tokens 4 --concurrency 7 --kv-dtype bf16`.
-Without selectors it runs the BF16/INT8 matrix and the KVarN long-decode fixtures.
-`--kvarn-repeatability` selects KVarN K4V2-G128; `--sample 1 --output-tokens 8192` checks
-long generation against a fresh execution of the same backend and draft count.
+Without selectors it runs all six formats and all MTP depths at concurrency 1, using the thinking-code
+fixture and 512 output tokens. Each case runs twice and compares against ordinary greedy output.
+`--kv-dtype kvarn --sample 1 --output-tokens 8192 --draft-tokens 3` checks long KVarN generation
+against ordinary decoding through the 4K/8K arithmetic transitions. Use `--kv-dtype int8` for the
+corresponding INT8 gate. Selecting a draft depth always retains the no-MTP reference run.
 An explicit `--corpus PATH` enables long resident prompts: samples 3..7 contain 8,190, 32,799,
 122,879, 196,607, and 245,743 tokens. Use `--prefix-reuse --concurrency 2` to exercise restored,
 unequal concurrent rows, or `--no-cuda-graph --full-proposal-head` for eager/full-head execution.
 The same KVarN harness accepts `--spec dflash2`, with draft counts 1, 3, 7, and 15, against the
 same-backend repeatability criterion; its artifact must contain the DFlash2 companion.
-KVarN follows Huawei's committed-group flush policy: current-step values remain unquantized
-through attention, so different speculative widths need not produce the ordinary token stream.
+KVarN MTP verification stops at group-publication boundaries so later queries see the same
+compressed history as ordinary decoding. FP8/NVFP4/K8V4 narrow attention launches independent
+canonical query columns together, with width- and batch-independent split schedules.
 The Op suite independently checks raw-current-chunk attention, represented history, and accepted
-group encoding against mathematical oracles; repeatability is supplementary state-lifetime evidence.
+group encoding against mathematical oracles. It also checks exact ordinary/MTP attention-column
+parity for masked, mixed-length batches, including split-policy transitions and CUDA Graph replay.
 
 The DFlash2 test also accepts the converted QUASAR artifact. Positional arguments select draft
 count, graphs, optimized proposal head, concurrency, KV storage, and optional Vision:

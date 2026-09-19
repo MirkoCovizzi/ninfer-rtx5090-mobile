@@ -2046,6 +2046,28 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
         failures += verify_invalid_columns_zero(label, output, geometry, width, valid);
         failures += cache.verify(label, expected);
         failures += cache.verify_untouched(label, before, positions, lanes, valid, width);
+        if (width <= 6) {
+            // Supplement the independent mathematical oracle with the decode/MTP invariance
+            // contract. Each scalar query uses its own exact envelope and the represented cache.
+            GuardedDeviceBuffer scalar_output(q.size() * sizeof(std::uint16_t));
+            scalar_output.fill(0);
+            Tensor scalar(scalar_output.data(), DType::BF16,
+                          {kHeadDim, geometry.q_heads, width, batch});
+            for (int b = 0; b < batch; ++b) {
+                for (int token = 0; token < valid[b]; ++token) {
+                    auto sq            = tq.slice(3, b, 1).slice(2, token, 1);
+                    auto sp            = tp.slice(1, b, 1).slice(0, token, 1);
+                    auto so            = scalar.slice(3, b, 1).slice(2, token, 1);
+                    const auto visible = static_cast<unsigned>(positions[b * width + token] + 1);
+                    ops::causal_softmax_attention_cached(
+                        sq, sp, op_geometry(geometry), kAttentionScale, cache.single_view(lanes[b]),
+                        {visible, visible}, workspace, so, device.stream);
+                }
+            }
+            cuda_synchronize(device.stream);
+            failures += verify_exact((label + " ordinary/MTP column parity").c_str(), output,
+                                     copy_from_guarded<std::uint16_t>(scalar_output, q.size()));
+        }
         if (control) {
             for (int b = 0; b < batch; ++b)
                 if (valid[b]) {
@@ -2214,6 +2236,16 @@ int run_batch_cases() {
     for (auto storage :
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
           KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+        // Mixed histories straddle per-query split-policy transitions. A longer neighbor or
+        // a broad graph envelope must not change the short row's represented attention result.
+        failures += run_batch_case(kGeometries[0], storage,
+                                   {6,
+                                    {4093, 8195, 39998},
+                                    {6, 6, 3},
+                                    {2, 0, 1},
+                                    MappingPattern::Fragmented,
+                                    1499u,
+                                    true});
         failures += run_batch_case(kGeometries[0], storage,
                                    {16, {0}, {0}, {0}, MappingPattern::Fragmented, 1501u});
         failures += run_batch_case(kGeometries[0], storage,

@@ -120,9 +120,13 @@ scratch. One encode launch completes before one fused marker/restore launch; eac
 owns a layer's markers and all its heads. Rows and Main/MTP pools remain separately ordered.
 This removes per-layer launch sequences without moving encoding before final publication.
 
-The reference policy is step-dependent: a speculative block can retain unquantized values longer
-than token-at-a-time decoding. Exact ordinary-versus-speculative token identity is not a KVarN
-contract. Prefix-state ownership and acceptance still preserve the exact selected execution state.
+MTP target verification is bounded per row by the next 128-token group boundary, including the
+anchor column. Publication therefore settles a completed group before any target query in the next
+group, exactly as ordinary decoding does. The physical verification width and CUDA Graph remain
+fixed; device valid-column counts mask the shortened row. Other rows keep their own extents. This
+preserves ordinary-versus-MTP greedy token identity without encoding rejected suffixes or changing
+the codec. Draft proposals may retain provisional raw history; only target verification determines
+acceptance. DFlash retains its separate same-schedule numerical contract.
 
 Native decode retains scalar/four/eight-column schedules and per-query split partitions. Encoded
 G128 records are staged in 64-token slices to bound shared-memory use; this does not change the
@@ -177,14 +181,16 @@ reasoning/quality benchmark results or stochastic tool-call reliability.
 #### Execution Regression
 
 Use `ninfer_qwen3_5_mtp_greedy_parity_real_test` with
-`NINFER_TEST_ARTIFACT` set to an explicit artifact path. `--kvarn-repeatability` selects KVarN;
-its default is 8,192 output tokens, two fresh executions per case/row/depth, and a 1,024-token prefill
-chunk. `--output-tokens 128..16384` supports focused cases. A short smoke is not the long-decode
-gate: the reproduced identifier-prompt failure was at output token 3,888.
+`NINFER_TEST_ARTIFACT` set to an explicit artifact path. `--kv-dtype kvarn` selects KVarN;
+the default is the thinking-code fixture, 512 output tokens, two fresh executions per case/row/depth,
+and a 1,024-token prefill chunk. Every MTP depth is compared against ordinary greedy decoding, even
+when `--draft-tokens` selects only one depth. `--output-tokens 128..16384` supports focused cases.
+A 128-token smoke misses the reproduced cross-backend divergence at output index 357; long decode
+also exercises packed-query and split-policy transitions beyond the 512-token gate.
 
-| Case | Arguments after `--kvarn-repeatability` | Protected behavior |
+| Case | Arguments after `--kv-dtype kvarn` | Protected behavior |
 |---|---|---|
-| Long decode | `--sample 1 --output-tokens 8192` | Same-backend repeatability across packed, 4K, and 8K transitions |
+| Long decode | `--sample 1 --output-tokens 8192` | Ordinary/MTP parity and repeatability across packed, 4K, and 8K transitions |
 | Mixed rows | `--sample 1 --output-tokens 512 --concurrency 8` | Unequal prompt/output lengths, compact batches, and row completion |
 | Prefix restore | `--sample 1 --output-tokens 512 --concurrency 2 --prefix-reuse` | One-token prewarm, exact reused frontier, and resumed greedy output |
 | Eager/full head | `--sample 1 --output-tokens 8192 --draft-tokens 5 --no-cuda-graph --full-proposal-head --prefill-chunk 128` | Eager execution, full proposal head, and a different prefill chunk |
@@ -192,6 +198,7 @@ gate: the reproduced identifier-prompt failure was at output token 3,888.
 | Long resident context | `--sample 6` or `--sample 7`, with `--output-tokens 512 --draft-tokens 3 --corpus /path/to/corpus.ids` | MTP3 at 192K and about 240K prompt tokens |
 
 Samples 0/1 are thinking-code/non-thinking-identifier chats; sample 2 is a 2,110-token raw prompt.
+Concurrent raw rows have distinct leading request labels to retain independent prewarmed endpoints.
 With a whitespace-separated token-ID corpus, samples 3..7 use 8,190, 32,799, 122,879, 196,607,
 and 245,743 prompt tokens. `--draft-tokens 1..5` selects one MTP depth; otherwise all depths
 run. `--concurrency 1..8` varies row prompts and output budgets and asserts that a multi-row case

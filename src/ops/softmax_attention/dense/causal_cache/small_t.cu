@@ -47,7 +47,9 @@ template <typename Geometry>
 std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens,
                                         KvCacheStorage storage) {
     if constexpr (Geometry::SmallTSplitScale == 1) {
-        if (storage == KvCacheStorage::Fp8E4M3Row256 && tokens == 1 && window > 8198) {
+        if ((storage == KvCacheStorage::Fp8E4M3Row256 || storage == KvCacheStorage::Nvfp4Group16 ||
+             storage == KvCacheStorage::Fp8KeyNvfp4Value) &&
+            tokens == 1 && window > 8198) {
             return Geometry::SmallTMaximumSplits;
         }
     }
@@ -223,6 +225,13 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
         throw std::invalid_argument("causal_softmax_attention split capacity: invalid profile");
     }
     (void)paged_kv_storage_layout(cache_storage, kCausalHeadDim);
+    if (tokens <= 6 && cache_storage != KvCacheStorage::BFloat16 &&
+        cache_storage != KvCacheStorage::Int8Group64) {
+        // MTP queries execute independent canonical columns. Batch membership and speculative
+        // width must not clip their per-position split/reduction schedule.
+        tokens     = 1;
+        batch_size = 1;
+    }
     if (q_heads == CausalD256H24Kv4::QHeads) {
         const int capacity =
             causal_small_t_launch_capacity<CausalD256H24Kv4>(envelope, tokens, cache_storage);

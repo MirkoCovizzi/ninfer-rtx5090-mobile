@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,7 +12,7 @@ import unittest
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 ROOT = Path(__file__).resolve().parents[2]
-RENDERER = ROOT / "build" / "tests" / "ninfer_jinja_test"
+RENDERER = Path(os.environ.get("NINFER_JINJA_TEST", ROOT / "build" / "tests" / "ninfer_jinja_test"))
 SOURCES = {
     version: (ROOT / "tools" / "chat_templates" / f"{version}.jinja").read_text()
     for version in ("qwen3_6", "qwen3_8")

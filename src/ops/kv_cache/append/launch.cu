@@ -25,7 +25,7 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
             constexpr int TokensPerTile = 8;
             const int max_tiles         = div_up(tokens + TokensPerTile - 1, TokensPerTile);
             const dim3 fill_grid(static_cast<unsigned>(max_tiles),
-                                 static_cast<unsigned>(Geometry::KVHeads));
+                                 static_cast<unsigned>(Geometry::KVHeads), k.ne[3]);
             kv_cache_append_full_fp8_page_kernel<Geometry, Metadata>
                 <<<fill_grid, kBlock, 0, stream>>>(
                     static_cast<const __nv_bfloat16*>(k.data),
@@ -38,8 +38,9 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         } else {
             constexpr int FillWarps       = kBlock / 32;
             const std::int64_t fill_units = static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
-            const int fill_grid =
-                static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
+            const dim3 fill_grid(
+                static_cast<unsigned>(div_up(fill_units, static_cast<std::int64_t>(FillWarps))), 1,
+                k.ne[3]);
             kv_cache_append_full_fp8_kernel<Geometry, Metadata><<<fill_grid, kBlock, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(k.data),
                 static_cast<const __nv_bfloat16*>(v.data),

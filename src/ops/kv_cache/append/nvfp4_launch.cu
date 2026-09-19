@@ -22,7 +22,8 @@ void launch_nvfp4_for(const Tensor& k, const Tensor& v, const Tensor& positions,
     if (tokens >= 128 && Geometry::KVHeads == 2) {
         constexpr int TokensPerTile = 8;
         const int max_tiles         = div_up(tokens + TokensPerTile - 1, TokensPerTile);
-        const dim3 grid(static_cast<unsigned>(max_tiles), static_cast<unsigned>(Geometry::KVHeads));
+        const dim3 grid(static_cast<unsigned>(max_tiles), static_cast<unsigned>(Geometry::KVHeads),
+                        k.ne[3]);
         kv_cache_append_full_nvfp4_page_kernel<Geometry, Metadata><<<grid, kBlock, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(k.data), static_cast<const __nv_bfloat16*>(v.data),
             static_cast<const std::int32_t*>(positions.data), metadata, cache_k, cache_v, scale_k,
@@ -30,7 +31,9 @@ void launch_nvfp4_for(const Tensor& k, const Tensor& v, const Tensor& positions,
     } else {
         constexpr int FillWarps       = kBlock / 32;
         const std::int64_t fill_units = static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
-        const int grid = static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
+        const dim3 grid(
+            static_cast<unsigned>(div_up(fill_units, static_cast<std::int64_t>(FillWarps))), 1,
+            k.ne[3]);
         kv_cache_append_full_nvfp4_kernel<Geometry, Metadata><<<grid, kBlock, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(k.data), static_cast<const __nv_bfloat16*>(v.data),
             static_cast<const std::int32_t*>(positions.data), metadata, cache_k, cache_v, scale_k,

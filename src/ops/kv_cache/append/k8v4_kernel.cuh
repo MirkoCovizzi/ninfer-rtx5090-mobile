@@ -76,6 +76,11 @@ __launch_bounds__(256) __global__
                                           std::uint8_t* __restrict__ cache_v,
                                           __half* __restrict__ scale_k,
                                           std::uint8_t* __restrict__ scale_v, std::int32_t width) {
+    const auto row = static_cast<std::int64_t>(blockIdx.z);
+    metadata       = metadata.for_row(static_cast<int>(row));
+    k += row * width * kKVCacheNvfp4HeadDim * Geometry::KVHeads;
+    v += row * width * kKVCacheNvfp4HeadDim * Geometry::KVHeads;
+    positions += row * width;
     constexpr int Warps         = 8;
     constexpr unsigned FullMask = 0xffffffffU;
     __shared__ float scratch[Warps][kKVCacheNvfp4HeadDim];
@@ -103,6 +108,11 @@ __launch_bounds__(256) __global__ void kv_cache_append_full_k8v4_page_kernel(
     const std::int32_t* __restrict__ positions, Metadata metadata,
     std::uint8_t* __restrict__ cache_k, std::uint8_t* __restrict__ cache_v,
     __half* __restrict__ scale_k, std::uint8_t* __restrict__ scale_v, std::int32_t width) {
+    const auto row = static_cast<std::int64_t>(blockIdx.z);
+    metadata       = metadata.for_row(static_cast<int>(row));
+    k += row * width * kKVCacheNvfp4HeadDim * Geometry::KVHeads;
+    v += row * width * kKVCacheNvfp4HeadDim * Geometry::KVHeads;
+    positions += row * width;
     constexpr int Warps         = 8;
     constexpr int TokensPerTile = 8;
     constexpr unsigned FullMask = 0xffffffffU;
