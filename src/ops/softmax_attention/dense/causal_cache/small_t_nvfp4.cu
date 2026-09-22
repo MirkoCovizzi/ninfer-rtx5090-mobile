@@ -118,31 +118,10 @@ void causal_attention_small_t_nvfp4_launch_for(
         }
     };
 
-    switch (invocation.width) {
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 5:
-    case 6:
-        // Independent query CTAs retain ordinary-decode arithmetic in one batched launch.
-        dispatch_metadata.template operator()<1>();
-        break;
-    case 7:
-        if constexpr (Geometry::QHeads == 24) {
-            dispatch_metadata.template operator()<7>();
-            break;
-        }
-        throw std::invalid_argument("unsupported query-row tile");
-    case 8:
-        if constexpr (Geometry::QHeads == 24) {
-            dispatch_metadata.template operator()<8>();
-            break;
-        }
-        throw std::invalid_argument("unsupported query-row tile");
-    default:
+    if (invocation.width < 1 || invocation.width > 16) {
         throw std::invalid_argument("causal_attention_small_t_nvfp4_launch: unsupported T");
     }
+    dispatch_metadata.template operator()<1>();
 
     const bool masked = invocation.valid_columns != nullptr;
     if (invocation.batch_size == 1) {
@@ -188,7 +167,7 @@ void causal_attention_small_t_nvfp4_launch(
             q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
             partial_l, out, stream);
     };
-    if (width > 1 && width <= 6) {
+    if (width > 1 && width <= 16) {
         kv_cache_append_batch_launch(k, v, positions, valid_columns, table_rows, cache, stream);
         launch(CausalCachedInput{});
     } else {

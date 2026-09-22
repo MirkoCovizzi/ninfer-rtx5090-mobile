@@ -179,7 +179,7 @@ The artifact supports:
 
 - text generation in thinking and non-thinking modes;
 - image, multi-image, video, and mixed multimodal messages;
-- MTP speculative decoding with draft windows from one to five;
+- MTP speculative decoding with fixed or adaptive draft windows from one to fifteen;
 - DFlash speculative decoding for Text and image/video Vision prompts with draft windows from one
   to fifteen;
 - BF16, INT8, FP8, NVFP4, and K8V4 KV cache;

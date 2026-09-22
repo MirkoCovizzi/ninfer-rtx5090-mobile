@@ -115,7 +115,7 @@ void launch_matrix(const Tensor& x, const Weight& weight, Tensor& residual, cuda
 
 void nvfp4_linear_add_a16_launch(const Tensor& x, const Weight& weight, Tensor& residual,
                                  cudaStream_t stream) {
-    if (weight.k == 6144 && x.ne[1] <= 8 * 6) {
+    if (weight.k == 6144 && x.ne[1] <= 8 * 16) {
         // Keep the observable residual update width-invariant for decode/MTP.
         for (int begin = 0; begin < x.ne[1]; begin += 32) {
             const int count = x.ne[1] - begin < 32 ? x.ne[1] - begin : 32;

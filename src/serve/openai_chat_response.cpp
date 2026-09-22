@@ -94,8 +94,8 @@ CompletionTimings outcome_timings(const GenerationOutcome& outcome) {
         outcome.metrics.prefix_cache_hit_tokens,
         static_cast<std::uint32_t>(std::max(0, outcome.completion_tokens)),
         outcome.metrics.prompt_wall_seconds * 1000.0,
-        outcome.metrics.generation_wall_seconds * 1000.0, outcome.metrics.speculative_draft_tokens,
-        outcome.metrics.speculative_accepted_tokens);
+        outcome.metrics.generation_wall_seconds * 1000.0,
+        outcome.metrics.speculative.drafted_tokens, outcome.metrics.speculative.accepted_tokens);
 }
 
 CompletionTimings observation_timings(std::uint32_t prompt_tokens, std::uint32_t cached_tokens,

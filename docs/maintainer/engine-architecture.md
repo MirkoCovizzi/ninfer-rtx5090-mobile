@@ -150,6 +150,30 @@ Program 是模型实例的物理执行入口，拥有：
 
 Program 不维护 FIFO、SessionIndex、cache retention 价值或用户可见输出。
 
+MTP 的 `Fixed`/`Adaptive` draft policy 也属于 Program 的物理执行决策。Adaptive 不改变
+Scheduler 的 exact-B compact batch：每个 round 仍只有一个紧凑 batch，并在 round boundary
+选择一个 active K。Adaptive 只使用 `min(3,Kmax)`、`min(7,Kmax)` 与 `Kmax`，去重后最多
+三个执行宽度。RequestControl 记录连续完整接受前三个/前七个 draft 的次数；三个有效成功
+observation 允许探测更宽窗口，首次可从 K3 直接探测 Kmax。Program 持有当前 cohort 的
+K3/K7 实测执行 cost，以及最近两个完整当前宽度 observation。Trial 要比更便宜的 tier
+预计 useful tokens / second 高 5% 才保留。Kmax 不合算但 prefix 在 K3 之后仍有收益时试 K7；
+接受率崩溃则直接回 K3。K7 必须实测优于 K3，并可在冷却后凭三个完整七 draft 成功重新
+探测 Kmax。Kmax 失败后，后续从 K3 恢复优先试 K7。较窄 tier 的收益由同一组 verified
+prefix 的 `1+min(accepted,K)` 估计，cost 使用当前 cohort 的实测 EWMA。计时包含执行与 settlement、排除 graph
+构造，并且每个 compact batch 只计一次；cohort 变化会重置 controller。失败后的重试
+cooldown 为 8/16/32 个有效 K3/K7 round，避免反复探测只有短 prefix 可预测的文本。
+已建立的 K7 residency 连续两次 rolling window 不合算才退出；K7 失败后的冷却为四轮，
+不沿用昂贵 Kmax trial 的长冷却。
+
+Adaptive 的 backing 固定为最多 K15；verification 与下一轮 proposal 共用当前 active K。
+初始 proposal 为 min(3,Kmax)，窄窗口不会执行上限 Kmax 的 AR/proposal-head 工作。
+widening 的第一轮只验证现有较短 chain，同时生成新的较宽 chain；该过渡不计为 trial 失败。
+trial 必须获得两个完整宽度的 observation。预算尾部、KVarN group 边界、取消与 terminal
+round 不作为 cost/收益比较证据。Graph/workspace 只规划这三个可达 tier；AR 节点数、KV 映射
+和执行 envelope 均按 active K 规划。MTP
+`SpeculativeStats` 的 per-position 与 per-window 计数只在 MTP request 上建立，window vector
+按 K-1 索引，提交的 token、fallback、accepted/drafted token 和 decode time 必须守恒。
+
 ---
 
 ## 3. 唯一所有权
@@ -220,8 +244,9 @@ GenerationCore 或 CausalScoreCore 在实例准备完成后使用它。
 workspace 和 Graph。销毁时先结束 Engine core 和未决设备工作，再销毁实例的 Program、
 Frontend 和 Parameters，最后释放 Model backing。Reader 与上传 staging 属于加载生命周期。
 
-权重、State/KV backing、block-table matrices、workspace 与 CUDA Graph resources 在 Engine 开始接受请求前
-建立。运行期改变 ownership、mapping、frontier 与 replica placement，但不重建这些大块 Device allocations。
+权重、State/KV backing、block-table matrices 与 workspace 在 Engine 开始接受请求前建立。
+CUDA Graph 在启动时 prime 代表性 topology；Adaptive MTP 的其他 profile 在首次使用时 capture。
+运行期改变 ownership、mapping、frontier 与 replica placement，但不重建这些大块 Device allocations。
 
 ### 3.5 固定执行与原生参数
 
@@ -525,6 +550,13 @@ ResourceManager 与完成所有 request response。内部不变量错误不能�
 - growing KV 由共享 paged pools 支持，active request 持有完整增长 reservation；
 - 一个 GPU execution unit 内 State/KV mapping 保持稳定；
 - CUDA Graph 按合法 exact-`B` topology 建立，request identity 和 page IDs 是稳定输入数据，不是 graph key；
+- Adaptive MTP 的 graph residency 只保留每个 reachable topology class 的一个 executable；active K
+  或 exact-B shape 改变时，在 settled round boundary replace incompatible shape，而不是同时驻留
+  K×B 个 executable。每个 `(B,K)` 最多保留一个 frontier 的 Host graph definition，切换 frontier
+  时替换该 definition；首次使用新的 shape/profile 才 capture。Executable 自身持有已实例化的
+  参数，definition 的释放不使 executable 失效。Device reservation 只计 executable/driver
+  allowance，不把每个 Host definition 重复记为 Device allocation。Eager 与 graph 走同一个
+  active-width schedule，所有 captured 指针仍指向启动时固定的 backing。
 - ordinary decode 不运行 catalog scan、pressure search 或后台 replica scan；
 - workspace 是 Program 启动时统一规划的 backing，Vision、Text 和 speculative schedule 按互斥 lifetime
   使用其内部区域。

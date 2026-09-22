@@ -203,6 +203,8 @@ void print_generation_summary(const ninfer::GenerationResult& result,
     if (speculative.enabled) {
         const std::string backend = ninfer::product::speculative_backend_name(speculative.backend);
         print_metric(backend + " draft window", std::to_string(speculative.draft_window));
+        print_metric(backend + " draft policy",
+                     ninfer::product::mtp_draft_policy_name(speculative.mtp_draft_policy));
         print_metric(backend + " rounds", std::to_string(speculative.rounds));
         print_metric(backend + " fallback steps", std::to_string(speculative.fallback_steps));
         print_metric(backend + " drafted tokens", std::to_string(speculative.drafted_tokens));
@@ -224,6 +226,31 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                 positions << speculative.accepted_per_position[i];
             }
             print_metric(backend + " accepted by pos", positions.str());
+        }
+        if (!speculative.drafted_per_position.empty()) {
+            std::ostringstream positions;
+            for (std::size_t i = 0; i < speculative.drafted_per_position.size(); ++i) {
+                if (i != 0) { positions << ','; }
+                positions << speculative.drafted_per_position[i];
+            }
+            print_metric(backend + " drafted by pos", positions.str());
+        }
+        if (speculative.window_transitions != 0) {
+            print_metric(backend + " window transitions",
+                         std::to_string(speculative.window_transitions));
+        }
+        if (!speculative.window_stats.empty()) {
+            std::ostringstream windows;
+            bool first_window = true;
+            for (std::size_t i = 0; i < speculative.window_stats.size(); ++i) {
+                const auto& window = speculative.window_stats[i];
+                if (window.rounds == 0) { continue; }
+                if (!first_window) { windows << ','; }
+                windows << 'K' << (i + 1) << ':' << window.rounds << '/' << window.fallback_steps
+                        << '/' << window.accepted_tokens;
+                first_window = false;
+            }
+            if (!first_window) { print_metric(backend + " windows", windows.str()); }
         }
     }
 }

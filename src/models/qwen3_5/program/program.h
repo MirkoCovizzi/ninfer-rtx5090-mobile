@@ -49,9 +49,10 @@ enum class TextPhase {
 };
 
 struct GraphExecutionProfile {
-    std::uint32_t min            = 0;
-    std::uint32_t max            = 0;
-    std::uint32_t topology_class = 0;
+    std::uint32_t min              = 0;
+    std::uint32_t max              = 0;
+    std::uint32_t topology_class   = 0;
+    std::uint32_t mtp_draft_window = 0;
 };
 
 // Program-minted shortlist metadata. It only narrows catalog inspection; Program still performs

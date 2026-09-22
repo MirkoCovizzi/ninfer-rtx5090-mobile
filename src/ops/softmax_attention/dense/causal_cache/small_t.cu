@@ -220,12 +220,12 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
                                              KvCacheStorage cache_storage,
                                              CausalAttentionExecutionEnvelope envelope,
                                              std::int32_t batch_size) {
-    if (tokens < 1 || tokens > (q_heads == 24 ? 8 : 6) || envelope.min_visible_keys == 0 ||
+    if (tokens < 1 || tokens > 16 || envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("causal_softmax_attention split capacity: invalid profile");
     }
     (void)paged_kv_storage_layout(cache_storage, kCausalHeadDim);
-    if (tokens <= 6 && cache_storage != KvCacheStorage::BFloat16 &&
+    if (tokens <= 16 && cache_storage != KvCacheStorage::BFloat16 &&
         cache_storage != KvCacheStorage::Int8Group64) {
         // MTP queries execute independent canonical columns. Batch membership and speculative
         // width must not clip their per-position split/reduction schedule.
@@ -304,40 +304,12 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
         }                                                                                          \
     } while (0)
 
-    switch (invocation.width) {
-    case 1:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(1);
-        break;
-    case 2:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(2);
-        break;
-    case 3:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(3);
-        break;
-    case 4:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(4);
-        break;
-    case 5:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(5);
-        break;
-    case 6:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(6);
-        break;
-    case 7:
-        if constexpr (Geometry::QHeads == 24) {
-            NINFER_CAUSAL_SMALL_T_DISPATCH(7);
-            break;
-        }
-        throw std::invalid_argument("unsupported query-row tile");
-    case 8:
-        if constexpr (Geometry::QHeads == 24) {
-            NINFER_CAUSAL_SMALL_T_DISPATCH(8);
-            break;
-        }
-        throw std::invalid_argument("unsupported query-row tile");
-    default:
+    if (invocation.width < 1 || invocation.width > 16) {
         throw std::invalid_argument("causal_attention_small_t_launch: unsupported T");
     }
+    // Keep every verification width on the canonical independent-column path. The query CTAs
+    // remain batched; only their arithmetic/reduction profile is the same as ordinary decode.
+    NINFER_CAUSAL_SMALL_T_DISPATCH(1);
 #undef NINFER_CAUSAL_SMALL_T_DISPATCH
 
     constexpr int kReduceBlock = 256;

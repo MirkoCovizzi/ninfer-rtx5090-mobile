@@ -125,7 +125,7 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
  *
  * The registered prompt route consumes the paged cache directly and requires zero transient
  * workspace. Small-T routes may use the split state returned by the capacity query below.
- * Decode/MTP widths W=1..6 use a canonical per-query arithmetic profile: grouping the same queries
+ * Decode/MTP widths W=1..16 use a canonical per-query arithmetic profile: grouping the same queries
  * into a wider or mixed-length batch does not change their represented outputs. Each route is
  * still qualified directly against the independent mathematical oracle, with exact column parity
  * as an additional execution-regression check.

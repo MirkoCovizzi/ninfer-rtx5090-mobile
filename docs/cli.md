@@ -162,7 +162,8 @@ long-decode, and long-context inputs.
 
 ## Speculative decoding
 
-Speculative decoding is disabled by default. Select MTP with one to five draft positions, or the
+Speculative decoding is disabled by default. Select MTP with a configured maximum of one to fifteen
+draft positions, or the
 35B-A3B DFlash or Qwen3.8-27B DFlash2 backend with one to fifteen. Both masked-draft backends
 may be combined with `--vision`.
 `--lm-head-draft` selects the optimized proposal head and requires a selected backend:
@@ -195,14 +196,20 @@ concurrent requests, sampling penalties, and prefix reuse. An artifact without t
 weights reports a missing DFlash2 component when selected. Vision, MTP and DFlash follow the same
 rule: their weights are required only when that component is enabled at startup.
 
-Only one speculative backend can be enabled per Engine. The published [performance results](performance.md)
+`--adaptive-mtp` uses K3, K7, and the configured maximum, clipped to that maximum and deduplicated.
+Three full-prefix successes can trigger a direct maximum-width trial. If the maximum is unprofitable
+but longer prefixes remain useful, K7 is tried before returning to K3. Sustained full K7 acceptance
+can probe the maximum again after cooldown. Measured execution cost and acceptance select residency. It requires
+`--spec mtp`; without it, MTP uses the configured fixed window. Each selected window bounds both
+verification and next-round proposal work: a K3 round does not generate fifteen drafts just because
+the configured maximum is fifteen. Only one speculative backend can be enabled per Engine. The published [performance results](performance.md)
 use MTP with three draft tokens and DFlash with seven draft tokens (block length eight), both with
 the optimized proposal head. DFlash accepts one to fifteen draft tokens; seven forms the measured
 block length eight, while fifteen uses the maximum supported block length sixteen.
 
 With greedy decoding, MTP preserves the committed token sequence: for the same artifact, prepared
 prompt, KV-cache dtype, and otherwise identical Engine and request configuration, disabling MTP or
-selecting any MTP draft window from one to five produces the same token IDs. The draft window and
+selecting any supported MTP draft window produces the same token IDs. The draft window and
 proposal head may change acceptance and throughput, but not the greedy output. This contract does
 not require bit-identical logits or intermediates and does not compare different artifacts or KV
 dtypes. With stochastic sampling, speculative acceptance preserves the processed target
@@ -222,7 +229,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4\|kvarn` | KV-cache storage (`kvarn` is Huawei K4V2-G128) | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--draft-tokens N` | MTP/DFlash/DFlash2 `1..15`; adaptive MTP treats N as its configured maximum | unset |
+| `--adaptive-mtp` | adapt MTP physical width up to `--draft-tokens`; requires MTP | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

@@ -70,7 +70,8 @@ std::string serve_usage_text(const char* argv0) {
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
-           "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
+           "[--prefill-chunk N] [--log-stats-interval-ms N] [--log-adaptive-mtp-stats] [--device "
+           "N] "
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
@@ -83,7 +84,8 @@ std::string serve_usage_text(const char* argv0) {
            "N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
-           "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
+           "[--chat-template FILE] [--adaptive-mtp] [--lm-head-draft] [--no-thinking] "
+           "[--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -101,6 +103,7 @@ std::string serve_usage_text(const char* argv0) {
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
+           "       --log-adaptive-mtp-stats adds per-window data to completed adaptive-MTP logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
@@ -183,6 +186,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--log-stats-interval-ms") {
             options.log_stats_interval_ms = static_cast<std::uint32_t>(parse_nonnegative_int(
                 require_value("--log-stats-interval-ms"), "log-stats-interval-ms"));
+        } else if (arg == "--log-adaptive-mtp-stats") {
+            options.log_adaptive_mtp_stats = true;
         } else if (arg == "--max-request-mib") {
             const std::uint64_t mib =
                 parse_u64(require_value("--max-request-mib"), "max-request-mib");
@@ -289,6 +294,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (arg == "--adaptive-mtp") {
+            options.speculative.mtp_draft_policy = MtpDraftPolicy::Adaptive;
         } else if (arg == "--chat-template") {
             options.chat_template_path = require_value("--chat-template");
         } else if (arg == "--no-thinking") {
@@ -362,6 +369,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
+    if (options.log_adaptive_mtp_stats &&
+        options.speculative.mtp_draft_policy != MtpDraftPolicy::Adaptive) {
+        throw std::invalid_argument("--log-adaptive-mtp-stats requires --adaptive-mtp");
+    }
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");

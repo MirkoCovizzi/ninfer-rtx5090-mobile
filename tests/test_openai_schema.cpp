@@ -602,8 +602,8 @@ GenerationOutcome sample_outcome() {
     outcome.metrics.prefix_cache_hit_tokens     = 12;
     outcome.metrics.prompt_wall_seconds         = 0.04;
     outcome.metrics.generation_wall_seconds     = 0.03;
-    outcome.metrics.speculative_draft_tokens    = 9;
-    outcome.metrics.speculative_accepted_tokens = 6;
+    outcome.metrics.speculative.drafted_tokens  = 9;
+    outcome.metrics.speculative.accepted_tokens = 6;
     return outcome;
 }
 

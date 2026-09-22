@@ -46,6 +46,15 @@ Vision is disabled by default: its weights and Vision-specific unified-workspace
 allocated, and media requests and token-count requests fail with HTTP 400 `vision_disabled`. Add
 `--vision` when the server must accept image or video input. Speculative residency is likewise
 frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` loads no speculative backend.
+MTP accepts a configured K from 1 through 15; `--adaptive-mtp` selects min(3,K), min(7,K), or K,
+while the default is a fixed K. Three full-prefix successes can trigger a direct maximum-width
+trial. Two full observations compare token yield per measured execution time with cheaper tiers.
+Unprofitable maximum trials try K7 when longer prefixes remain useful; collapsed acceptance returns
+to K3. After a failed maximum trial, recovery tries the middle tier first, and sustained full K7
+acceptance can probe the maximum again after cooldown. The flag requires `--spec mtp` and is
+startup-only; there is no per-request MTP policy option.
+The selected window bounds both verification and next-round proposal generation. With a maximum
+of fifteen, a K3 round still generates at most three drafts; K15 is used when selected by the controller.
 `--lm-head-draft` additionally loads the optimized proposal head. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
 with `--vision`; each accelerates generated-text decode after multimodal prefill, while Vision encode
 and prefill remain outside speculative acceleration. A later request cannot enable a capability
@@ -54,7 +63,7 @@ selected for this process.
 
 For a request resolved to greedy sampling, MTP preserves the committed token sequence. Holding the
 artifact, prepared prompt, KV-cache dtype, and all other Engine and request settings fixed, MTP-off
-and every MTP draft window from one to five return the same token IDs; the draft window and proposal
+and every supported MTP draft window return the same token IDs; the draft window and proposal
 head affect only acceptance and throughput. This is not a bit-identical-logit guarantee and does not
 compare different artifacts or KV dtypes. Under stochastic sampling, MTP preserves the processed
 target distribution rather than fixed-seed token identity because speculative execution may consume
@@ -791,7 +800,9 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4\|kvarn` | KV-cache storage (`kvarn` is Huawei K4V2-G128) | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--draft-tokens N` | MTP/DFlash/DFlash2 `1..15`; adaptive MTP treats N as its configured maximum | unset |
+| `--adaptive-mtp` | adapt MTP physical width up to `--draft-tokens`; requires MTP | off |
+| `--log-adaptive-mtp-stats` | add compact per-window adaptive-MTP detail to completion logs; requires adaptive MTP | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
@@ -857,7 +868,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v21 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v22 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -882,9 +893,12 @@ preserved for consumer validation, and a stable text-fallback reason. Fallback r
 `trailing_content`. These counters contain no tool arguments or generated text.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
-as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`,
+`mtp_draft_policy`, aggregate counters, `accepted_per_position`, `drafted_per_position`,
+`window_transitions`, and `window_stats`. `window_stats[K-1]` contains rounds, fallback, drafted,
+accepted, committed tokens, and full physical-round-plus-settlement `decode_seconds` for that K.
+These per-request timings are latency exposure and nonadditive across concurrent requests. Rates can
+be derived downstream from raw token counts and seconds instead of rounded stderr strings.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.
 When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token

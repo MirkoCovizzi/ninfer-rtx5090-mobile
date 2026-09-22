@@ -8,7 +8,7 @@
 namespace ninfer::models::qwen3_5 {
 
 inline constexpr std::uint32_t kPrefillChunkAlignment    = 128;
-inline constexpr std::uint32_t kMaximumMtpDraftTokens    = 5;
+inline constexpr std::uint32_t kMaximumMtpDraftTokens    = 15;
 inline constexpr std::uint32_t kMaximumDFlashDraftTokens = 15;
 
 } // namespace ninfer::models::qwen3_5

@@ -43,10 +43,10 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
-      speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
-      proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
-      use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
-      kv_payload_bytes(plan.persistent.kv_payload_bytes),
+      speculative_backend(plan.speculative_backend), mtp_draft_policy(plan.mtp_draft_policy),
+      kv_storage(plan.kv_storage), proposal_head(plan.proposal_head),
+      vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
+      causal_scoring(plan.causal_scoring), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
@@ -158,6 +158,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
         replay_fold.has_value() != replay_records.has_value()) {
         throw std::logic_error("ReplaySSM records do not match the sequence plan");
+    }
+    if (speculative_backend == SpeculativeBackend::Mtp &&
+        mtp_draft_policy == MtpDraftPolicy::Adaptive) {
+        mtp_controller.emplace();
+        mtp_controller->reset(draft_window);
     }
     if (plan.persistent.dflash) {
         CyclicKVCache* local = state_images->dflash_local();

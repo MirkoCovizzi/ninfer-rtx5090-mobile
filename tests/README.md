@@ -152,7 +152,7 @@ NINFER_TEST_ARTIFACT=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 The fork's greedy-MTP regression compares committed token IDs against ordinary decode for
-BF16, INT8, FP8, NVFP4, K8V4 and KVarN KV, draft counts 1..5, and selected concurrency 1..8:
+BF16, INT8, FP8, NVFP4, K8V4 and KVarN KV, draft counts 1..15, and selected concurrency 1..8:
 
 ```bash
 NINFER_TEST_ARTIFACT=/path/to/qwen3_8_27b_nvfp4.ninfer \
@@ -160,7 +160,7 @@ NINFER_TEST_ARTIFACT=/path/to/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 For a focused reproduction, use `--draft-tokens 4 --concurrency 7 --kv-dtype bf16`.
-Without selectors it runs all six formats and all MTP depths at concurrency 1, using the thinking-code
+Without selectors it runs all six formats at fixed depths 1..5 and 15 at concurrency 1, using the thinking-code
 fixture and 512 output tokens. Each case runs twice and compares against ordinary greedy output.
 `--kv-dtype kvarn --sample 1 --output-tokens 8192 --draft-tokens 3` checks long KVarN generation
 against ordinary decoding through the 4K/8K arithmetic transitions. Use `--kv-dtype int8` for the
@@ -178,6 +178,10 @@ NINFER_TEST_ARTIFACT=/path/to/qwen3_8_27b_nvfp4.ninfer \
   --kv-dtype kvarn --draft-tokens 3 --prefill-chunk 2048 --output-tokens 513
 ```
 
+`--adaptive --draft-tokens 15` compares adaptive windows against MTP-off, retaining the same KV
+algorithm. `--tool-loop --kv-dtype kvarn` checks three greedy turns with 27 tool schemas and long
+tool results, including endpoint reuse and response replay after client-rewritten reasoning.
+It compares token IDs, reasoning/content, finish reason, and tool arguments against MTP-off.
 The same KVarN harness accepts `--spec dflash2`, with draft counts 1, 3, 7, and 15, against the
 same-backend repeatability criterion; its artifact must contain the DFlash2 companion.
 KVarN MTP verification stops at group-publication boundaries so later queries see the same

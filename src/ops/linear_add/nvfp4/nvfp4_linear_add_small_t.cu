@@ -18,11 +18,17 @@ using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 
 template <class Geometry, int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
-    using Schedule = Nvfp4A16SimtSchedule<
-        (ActiveTokens <= 16 && ActiveTokens >= (Geometry::kInputRows == 6144 ? 14 : 8)) ? 16 : 4, 1,
-        2, (Geometry::kInputRows != 6144 && ActiveTokens >= 17 && ActiveTokens <= 20) ? 8 : 16,
-        ActiveTokens, 1, Nvfp4SimtActivationAccess::TokenPacked, Nvfp4ScaleAccess::Direct,
-        Nvfp4CodeCache::Default, 1, Nvfp4SimtBlockOrder::RowsContiguous, 1>;
+    // Tile the K15/C2 verification columns without changing each column's reduction.
+    constexpr bool kTileTokens = Geometry::kInputRows == 6144 && ActiveTokens == 32;
+    using Schedule             = Nvfp4A16SimtSchedule<
+                    (ActiveTokens <= 16 && ActiveTokens >= (Geometry::kInputRows == 6144 ? 14 : 8)) ? 16 : 4, 1,
+        kTileTokens ? 4 : 2,
+        (Geometry::kInputRows != 6144 && ActiveTokens >= 17 && ActiveTokens <= 20) ? 8 : 16,
+        kTileTokens ? 8 : ActiveTokens, 1, Nvfp4SimtActivationAccess::TokenPacked,
+        Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
+        kTileTokens ? Nvfp4SimtBlockOrder::TokenTilesContiguous
+                    : Nvfp4SimtBlockOrder::RowsContiguous,
+        kTileTokens ? 4 : 1>;
     launch_nvfp4_a16_simt<
         Nvfp4ScheduleInstance<Schedule, Geometry::kInputRows, ActiveTokens, true>>(
         nvfp4_a16_operands(x, weight),

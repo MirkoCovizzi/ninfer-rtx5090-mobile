@@ -67,7 +67,10 @@ int main() {
         device.synchronize();
         failures += expect_value(storage.base(), 0x11111111U, "first graph launch");
 
+        // Adaptive MTP evicts source definitions while retaining the instantiated executable.
+        first.reset();
         executable.update(second);
+        second.reset();
         executable.upload(device.stream);
         device.synchronize();
         failures += expect_value(storage.base(), 0x11111111U, "updated graph upload");

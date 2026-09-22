@@ -251,10 +251,23 @@ implementation own chunk-boundary and continuation alignment.
 
 An optional proposal head supplies an indexed vocabulary subset for draft prediction. Its row map
 converts proposal rows to actual token IDs. Full target verification continues to use the full
-output head. Backend selection, draft width and proposal-head choice are fixed at startup.
+output head. Backend selection, maximum draft width and proposal-head choice are fixed at startup.
+MTP defaults to a fixed width. Adaptive MTP selects min(3, Kmax), min(7, Kmax), or Kmax for the compact batch.
+Three consecutive complete three-draft-prefix successes trigger a direct wide trial. Two complete
+observations compare useful tokens per measured execution time with measured cheaper tiers;
+entering residency requires a 5% gain. Unprofitable maximum trials try K7 when the accepted prefixes
+extend beyond K3; otherwise they return to K3. K7 measures its own cost and stays only when it beats
+K3. After a failed maximum trial, the next promotion tries K7 first. Three full K7 successes can
+probe the maximum again once the 8/16/32-round retry cooldown expires. Established K7 residency
+requires two consecutive losing rolling windows before contraction; a failed K7 trial/residency
+has a shorter four-round cooldown. Verification and proposal generation use the same active width, clipped by budget and
+context. Initial proposals use min(3, Kmax). A widening round verifies the available shorter chain
+and generates the wider chain for the following round; it never executes Kmax proposals merely
+because backing was reserved for Kmax. Short-chain transitions, clipped groups/budgets and terminal
+rounds do not count against the trial. State settlement always uses the executed width.
 
 For every supported Main KV profile (BF16, INT8, FP8, NVFP4, K8V4 and KVarN), the fork requires
-exact committed-token parity between ordinary greedy decode and MTP draft windows 1..5 with the
+exact committed-token parity between ordinary greedy decode and MTP draft windows 1..15 with the
 same artifact, prepared prompt and otherwise identical configuration. This does not require
 bit-identical private intermediates. Narrow target attention uses per-query arithmetic independent
 of speculative width and compact batch membership. KVarN verification ends at a quantization-group

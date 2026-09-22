@@ -21,6 +21,7 @@ namespace {
 using Geometry = Nvfp4N34816K5120;
 // Column tiles amortize gate/up decode over the complete speculative block.
 using M16N128  = Nvfp4A4MmaSchedule<16, 128, 256, 1, 4, 2, 2>;
+using M32N128  = Nvfp4A4MmaSchedule<32, 128, 256, 2, 4, 2, 2>;
 using M48N64   = Nvfp4A4MmaSchedule<48, 64, 256, 3, 4, 2, 2>;
 using M64N128  = Nvfp4A4MmaSchedule<64, 128, 256, 4, 4, 2, 1>;
 using M128N128 = Nvfp4A4MmaSchedule<128, 128, 256, 4, 4, 2, 1>;
@@ -53,6 +54,8 @@ void nvfp4_linear_swiglu_a4_launch(const Tensor& x, const Weight& weight, Tensor
                                    WorkspaceArena& workspace, cudaStream_t stream) {
     if (x.ne[1] <= M16N128::kBlockTokens) {
         launch<M16N128>(x, weight, out, workspace, stream);
+    } else if (x.ne[1] <= M32N128::kBlockTokens) {
+        launch<M32N128>(x, weight, out, workspace, stream);
     } else if (x.ne[1] <= M48N64::kBlockTokens) {
         launch<M48N64>(x, weight, out, workspace, stream);
     } else if (x.ne[1] <= M64N128::kBlockTokens) {

@@ -287,13 +287,27 @@ Json vision_workspace_json(const std::optional<ninfer::VisionWorkspaceMemorySumm
 }
 
 Json speculative_json(const GenerationMetrics& metrics) {
-    return Json{{"backend", product::speculative_backend_name(metrics.speculative_backend)},
-                {"draft_window", metrics.speculative_draft_window},
-                {"rounds", metrics.speculative_rounds},
-                {"drafted_tokens", metrics.speculative_draft_tokens},
-                {"accepted_tokens", metrics.speculative_accepted_tokens},
-                {"fallback_steps", metrics.speculative_fallback_steps},
-                {"accepted_per_position", metrics.speculative_accepted_per_position}};
+    const ninfer::SpeculativeStats& stats = metrics.speculative;
+    Json windows                          = Json::array();
+    for (const ninfer::SpeculativeWindowStats& window : stats.window_stats) {
+        windows.push_back(Json{{"rounds", window.rounds},
+                               {"fallback_steps", window.fallback_steps},
+                               {"drafted_tokens", window.drafted_tokens},
+                               {"accepted_tokens", window.accepted_tokens},
+                               {"committed_tokens", window.committed_tokens},
+                               {"decode_seconds", window.decode_seconds}});
+    }
+    return Json{{"backend", product::speculative_backend_name(stats.backend)},
+                {"draft_window", stats.draft_window},
+                {"mtp_draft_policy", product::mtp_draft_policy_name(stats.mtp_draft_policy)},
+                {"rounds", stats.rounds},
+                {"drafted_tokens", stats.drafted_tokens},
+                {"accepted_tokens", stats.accepted_tokens},
+                {"fallback_steps", stats.fallback_steps},
+                {"window_transitions", stats.window_transitions},
+                {"accepted_per_position", stats.accepted_per_position},
+                {"drafted_per_position", stats.drafted_per_position},
+                {"window_stats", std::move(windows)}};
 }
 
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
@@ -476,6 +490,9 @@ std::string format_server_start_json(
              {"speculative_backend",
               product::speculative_backend_name(engine_options.speculative.backend)},
              {"speculative_draft_window", engine_options.speculative.draft_tokens},
+             {"mtp_draft_policy",
+              product::mtp_draft_policy_name(engine_options.speculative.mtp_draft_policy)},
+             {"log_adaptive_mtp_stats", options.log_adaptive_mtp_stats},
              {"proposal_head", proposal_head_name(engine_options.speculative.proposal_head)},
              {"context_cost", Json{{"transfer_source", ninfer::context_cost_preset_source_name(
                                                            context_cost.transfer_source)},

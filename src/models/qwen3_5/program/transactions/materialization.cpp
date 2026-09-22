@@ -319,7 +319,9 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
 
         const std::uint32_t initial_mtp_extent =
             speculative_backend == SpeculativeBackend::Mtp
-                ? std::min({draft_window,
+                ? std::min({mtp_draft_policy == MtpDraftPolicy::Adaptive
+                                ? std::min(3U, draft_window)
+                                : draft_window,
                             request_plan.summary.effective_output_tokens > 1
                                 ? request_plan.summary.effective_output_tokens - 2
                                 : 0U,

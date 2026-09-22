@@ -1013,8 +1013,10 @@ bool ProgramImpl::clear_lane_strict(SequenceState& sequence, RequestControl& req
     release_active_sequence_state_strict(sequence);
     retire_continuation_slot(continuation);
     request.prefill.reset();
-    request.lifecycle            = Lifecycle::Empty;
-    request.pending              = {};
+    request.lifecycle = Lifecycle::Empty;
+    request.pending   = {};
+    request.mtp_signal.reset();
+    request.mtp_active_window    = 0;
     request.active_resources     = {};
     request.optional_resources   = {};
     request.publish_continuation = true;
@@ -1037,8 +1039,10 @@ void ProgramImpl::clear_execution_failure_lanes(std::span<const std::uint32_t> l
 void ProgramImpl::clear_lane_best_effort(SequenceState& sequence,
                                          RequestControl& request) noexcept {
     request.prefill.reset();
-    request.lifecycle            = Lifecycle::Empty;
-    request.pending              = {};
+    request.lifecycle = Lifecycle::Empty;
+    request.pending   = {};
+    request.mtp_signal.reset();
+    request.mtp_active_window    = 0;
     request.active_resources     = {};
     request.optional_resources   = {};
     request.publish_continuation = true;

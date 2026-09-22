@@ -1,6 +1,8 @@
 #include "ops/linear/q8/q8_shapes.h"
 #include "ops/linear/q8/q8_instance_launch.cuh"
 
+#include <algorithm>
+
 namespace ninfer::ops::detail {
 namespace {
 using Geometry = Q8N248320K5120;
@@ -20,6 +22,17 @@ using C40 =
 using C48 = Q8A16SlicedKMmaSchedule<48, 8, 1, 2, Access::Shared, Cache::ca, Cache::cg,
                                     Stage::ActiveOnly, 0, 48, false, 24>;
 
+void launch_decode_columns(const Tensor& x, const Weight& weight, Tensor& out,
+                           cudaStream_t stream) {
+    // Bound per-CTA staging while retaining the ordinary-decode reduction for B8/W16.
+    for (std::int32_t begin = 0; begin < x.ne[1]; begin += 32) {
+        const std::int32_t count = std::min(32, x.ne[1] - begin);
+        Tensor input             = x.slice(1, begin, count);
+        Tensor output            = out.slice(1, begin, count);
+        launch_q8_a16_sliced<Geometry, 32, C32>(input, weight, output, stream);
+    }
+}
+
 } // namespace
 
 Q8Launch select_q8_n248320_k5120(std::int32_t tokens) {
@@ -29,8 +42,7 @@ Q8Launch select_q8_n248320_k5120(std::int32_t tokens) {
     if (tokens <= 32) return launch_q8_a16_sliced<Geometry, 32, C32>;
     if (tokens <= 40) return launch_q8_a16_sliced<Geometry, 40, C40>;
     if (tokens <= 48) return launch_q8_a16_sliced<Geometry, 48, C48>;
-    if (tokens <= 64) return launch_q8_a16_mma_r64x32_t64_k128_a1;
-    if (tokens <= 96) return launch_q8_a16_mma_r64_t96;
+    if (tokens <= 128) return launch_decode_columns;
     return launch_q8_a16_mma_r64_t128;
 }
 

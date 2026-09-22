@@ -85,6 +85,7 @@ int test_cli_contract() {
         "mtp",
         "--draft-tokens",
         "5",
+        "--adaptive-mtp",
         "--lm-head-draft",
         "--device",
         "1",
@@ -106,6 +107,8 @@ int test_cli_contract() {
     failures += expect(parsed.prefill_chunk == 128, "prefill chunk");
     failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::Int8Group64, "INT8 KV");
     failures += expect(parsed.speculative.draft_tokens == 5, "MTP window");
+    failures += expect(parsed.speculative.mtp_draft_policy == ninfer::MtpDraftPolicy::Adaptive,
+                       "adaptive MTP policy");
     failures += expect(parsed.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                        "optimized proposal head");
     failures += expect(parsed.device == 1 && !parsed.use_cuda_graph, "device and graph settings");
@@ -146,9 +149,20 @@ int test_cli_contract() {
     failures += expect_throws<std::invalid_argument>(
         [] {
             (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--spec", "mtp",
-                                  "--draft-tokens", "6"});
+                                  "--draft-tokens", "16"});
         },
         "unsupported MTP window");
+    failures += expect_throws<std::invalid_argument>(
+        [] {
+            (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--adaptive-mtp"});
+        },
+        "adaptive MTP without backend");
+    failures += expect_throws<std::invalid_argument>(
+        [] {
+            (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--spec", "dflash",
+                                  "--draft-tokens", "3", "--adaptive-mtp"});
+        },
+        "adaptive MTP with DFlash");
     failures += expect_throws<std::invalid_argument>(
         [] {
             (void)parse_for_test(
@@ -232,14 +246,25 @@ ninfer::GenerationTimings timings(double prepare, double prefill, double decode,
 ninfer::SpeculativeStats speculative(std::uint64_t rounds, std::uint64_t drafted,
                                      std::uint64_t accepted, std::uint64_t fallback,
                                      std::vector<std::uint64_t> per_position) {
+    const auto drafted_per_position = per_position;
     return {.backend               = ninfer::SpeculativeBackend::Mtp,
             .enabled               = true,
             .draft_window          = 5,
+            .mtp_draft_policy      = ninfer::MtpDraftPolicy::Adaptive,
             .rounds                = rounds,
             .drafted_tokens        = drafted,
             .accepted_tokens       = accepted,
             .fallback_steps        = fallback,
-            .accepted_per_position = std::move(per_position)};
+            .window_transitions    = rounds,
+            .accepted_per_position = std::move(per_position),
+            .drafted_per_position  = drafted_per_position,
+            .window_stats          = std::vector<ninfer::SpeculativeWindowStats>(
+                5, {.rounds           = rounds,
+                             .fallback_steps   = fallback,
+                             .drafted_tokens   = drafted,
+                             .accepted_tokens  = accepted,
+                             .committed_tokens = accepted + fallback,
+                             .decode_seconds   = 0.5})};
 }
 
 std::vector<qb::TestResult> sample_results() {
@@ -301,6 +326,7 @@ qb::BenchEnvironment sample_environment() {
     env.kv_cache                          = ninfer::KvCacheStorage::Int8Group64;
     env.speculative.backend               = ninfer::SpeculativeBackend::Mtp;
     env.speculative.draft_tokens          = 5;
+    env.speculative.mtp_draft_policy      = ninfer::MtpDraftPolicy::Adaptive;
     env.speculative.proposal_head         = ninfer::ProposalHead::Optimized;
     env.use_cuda_graph                    = true;
     env.decode_graph_primed               = true;
@@ -319,14 +345,16 @@ int test_report_contract() {
     Json report;
     try {
         report = Json::parse(qb::format_json(
-            env, "ninfer_bench --weights model.ninfer --spec mtp --draft-tokens 5", results));
+            env, "ninfer_bench --weights model.ninfer --spec mtp --draft-tokens 5 --adaptive-mtp",
+            results));
     } catch (const nlohmann::json::exception& error) {
         return fail(std::string("invalid benchmark JSON: ") + error.what());
     }
 
-    failures += expect(report.at("schema_version") == 15, "report schema v15");
+    failures += expect(report.at("schema_version") == 16, "report schema v16");
     failures += expect(report.at("config").at("speculative_backend") == "mtp" &&
-                           report.at("config").at("draft_tokens") == 5,
+                           report.at("config").at("draft_tokens") == 5 &&
+                           report.at("config").at("mtp_draft_policy") == "adaptive",
                        "report identifies its backend and window");
     failures += expect(report.at("artifact_type") == "ninfer_bench_report", "report identity");
     failures += expect(report.at("artifact").at("path") == "model.ninfer", "artifact path");
@@ -374,6 +402,11 @@ int test_report_contract() {
                             "speculative acceptance");
     failures += expect(tg.at("speculative").at("accepted_per_position").size() == 5,
                        "per-position acceptance");
+    failures +=
+        expect(tg.at("speculative").at("drafted_per_position").size() == 5 &&
+                   tg.at("speculative").at("window_transitions") == 1 &&
+                   tg.at("speculative").at("window_stats").at(4).at("committed_tokens") == 8,
+               "adaptive telemetry fields");
     failures +=
         expect(tg.at("reps").at(0).at("generated_output_tokens") == 4, "rep generated tokens");
     failures += expect(tg.at("reps").at(0).at("decode_engine_tokens") == 6, "rep engine tokens");
