@@ -1,5 +1,102 @@
 # Single-GPU serving performance
 
+## RTX 5090 Laptop adaptive-MTP concurrency-two tuning
+
+The September 21, 2026 comparison uses Qwen3.8-27B QUASAR NVFP4 v3 on the RTX 5090 Laptop
+GPU (24 GiB), CUDA 13.1.115, GCC 15.3, Release/`sm_120a`. Both builds use the same measured
+K3/K7/K15 adaptive controller, optimized proposal head, KVarN K4V2-G128 KV and CUDA Graphs.
+Only the 32-column, N=5120/K=6144 A16 residual-projection schedule changes: four output rows
+per warp and eight-column tiles replace two rows and a full 32-column tile. Each column keeps
+the same FMA and reduction order.
+
+Two public Engine requests are prepared before timing and submitted together. Each generates
+512 greedy tokens from `bench/fixtures/bench_corpus.ids`, with prompt offsets 0 and 128,
+prefix reuse disabled, model stop tokens disabled and 2,048-token prefill chunks. Per-request
+context capacity is prompt length + 1,536; shared KV capacity is twice that. Each run discards
+one warmup and measures three batches. The 8K baseline was repeated after the candidate to
+check the small improvement against timing drift; its table entry averages both baseline runs.
+
+Aggregate decode throughput is the sum of committed decode tokens divided by the Engine's
+decode Host-active plus device-wait interval counters. Concurrent requests' exposed decode
+times are not summed. Batch wall time includes both prefills and completion of both requests.
+
+| Prompt tokens/request | Before aggregate decode (tok/s) | After (tok/s) | Decode gain | Before batch (s) | After batch (s) |
+|---:|---:|---:|---:|---:|---:|
+| 8,192 | 386.2 | 396.8 | 2.7% | 5.586 | 5.510 |
+| 32,768 | 279.5 | 281.9 | 0.9% | 20.403 | 20.455 |
+
+These include one-row decode while the second request prefills and after the first finishes;
+mean physical batch sizes were 1.84 and 1.42, respectively. The 32K batch wall-time difference
+is dominated by prefill variation; this measurement establishes no total-request speedup there.
+The gain depends on residency at K15 with two active rows and is not a general serving-rate claim.
+
+Nsight Systems attributed about 17% of the 8K decode interval to this projection. Targeted
+Nsight Compute profiling reduced kernel time from 246 to 197 microseconds, registers/thread
+from 168 to 128, and increased achieved occupancy from 22.3% to 30.9%, without spilling.
+The Op profiling command is:
+
+```bash
+ncu --profile-from-start off --set basic --section Occupancy --section MemoryWorkloadAnalysis \
+  build/bench/ninfer_nvfp4_linear_add_bench --n 5120 --k 6144 --policy a16 \
+  --t-sweep 32 --profile
+```
+
+Qualification covers the independent FP64 Op oracle, exact batched-versus-single-column
+residual updates, and C=2 KVarN greedy parity against MTP-off with ragged 8K prompts,
+prefix reuse, CUDA Graph replay and all three adaptive tiers.
+
+### Follow-up: Q4 shared-memory layout and 32-column SwiGLU
+
+A second comparison uses the residual-tiled implementation above as its baseline, on the same
+hardware/toolchain and artifact. The selected changes are:
+
+- Pad each Q4 K-split shared code row by 16 bytes. This separates the eight MMA row groups'
+  shared-memory banks while preserving aligned asynchronous transfers and the arithmetic order.
+  Nsight Compute measured the N=131072/K=5120/T=2 projection at 821 versus 552 microseconds;
+  DRAM utilization rose from 60.2% to 90.5%, with unchanged register count and no spills.
+- Use a 32-column/128-row tile for NVFP4 fused SwiGLU at T=17..32. Previously T=32 used a
+  48-column/64-row tile. Cold-cache public-Op timing at T=32 improved from 143 to 135 microseconds.
+  The existing BF16 gate/up boundary and SiLU calculation are preserved.
+
+The public Engine measurements again use one discarded warmup and three measured batches,
+greedy sampling, no prefix reuse and disabled model stop tokens. The corpus pair uses the same
+8K/512-output workload above. Chat pairs have a 2,048-token context capacity and 1,024 output
+tokens per request; aggregate decode counters include the one-row tail when one request finishes.
+
+| Two-request workload | Before aggregate decode (tok/s) | After (tok/s) | Gain | Before batch (s) | After batch (s) |
+|---|---:|---:|---:|---:|---:|
+| 8K corpus pair | 393.8 | 408.9 | 3.8% | 5.559 | 5.461 |
+| Snake code pair | 250.1 | 255.0 | 2.0% | 8.367 | 8.211 |
+| Snake code + storage-design reasoning | 151.7 | 152.1 | 0.3% | 13.698 | 13.662 |
+
+The mixed-pair difference is too small to claim a material improvement. Mean physical batch sizes
+were approximately 1.84, 2.00 and 1.60. The chat prompts are:
+
+- Code, thinking disabled: “Implement a complete Snake game in Python using pygame. Include
+  movement, food, scoring, collision detection, a start screen, pause, restart and game over.
+  Output only the complete Python code, without explanations.”
+- Reasoning, thinking enabled: “Design a crash-safe concurrent key-value store in C++. Reason
+  carefully about atomicity, write-ahead logging, snapshots, compaction, and recovery after power
+  loss. Compare at least three designs and analyze their correctness and failure cases before
+  choosing one. Do not write code yet.”
+
+A controller candidate allowing any confident continuing row to trigger a wider probe was
+rejected: mixed-pair throughput fell from 151.7 to 143.8 tok/s, about 5.2%, with substantially
+more K7 work. Wider-probe eligibility alone did not improve the aggregate objective.
+
+Independent mathematical-oracle tests passed for Q4 Linear and its affected fused consumers,
+and for NVFP4 SwiGLU including the new route boundaries and graph replay. C=2 KVarN generation
+matched MTP-off token-for-token at ragged 8K and 32K contexts with prefix reuse. The parity
+fixture reserves independently rounded per-request KV capacity so the long-context case truly
+executes compact batches rather than serializing for lack of a physical page.
+
+Reproduce the focused public-Op measurements with:
+
+```bash
+build/bench/ninfer_linear_bench --qtype q4 --n 131072 --k 5120 --t 2 --repeat 100
+build/bench/ninfer_nvfp4_linear_swiglu_bench --policy a4 --t-sweep 16,32,48 --repeat 100
+```
+
 ## RTX 5090 Laptop upstream integration through 9e163eee
 
 The September 19, 2026 integration compares the fork's `master` at `ac508b13` with the merge

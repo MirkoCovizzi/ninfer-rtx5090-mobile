@@ -121,6 +121,24 @@ int main() {
     failures += check(dflash.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                       "--lm-head-draft did not select the optimized proposal head");
 
+    const ServeOptions adaptive =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "15",
+               "--adaptive-mtp", "--log-adaptive-mtp-stats"});
+    failures += check(adaptive.speculative.mtp_draft_policy == ninfer::MtpDraftPolicy::Adaptive &&
+                          adaptive.log_adaptive_mtp_stats,
+                      "serve options did not preserve adaptive MTP configuration");
+    bool adaptive_without_mtp_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--adaptive-mtp"});
+    } catch (const std::invalid_argument&) { adaptive_without_mtp_rejected = true; }
+    failures += check(adaptive_without_mtp_rejected, "serve accepted adaptive MTP without MTP");
+    bool adaptive_log_without_mtp_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--log-adaptive-mtp-stats"});
+    } catch (const std::invalid_argument&) { adaptive_log_without_mtp_rejected = true; }
+    failures += check(adaptive_log_without_mtp_rejected,
+                      "serve accepted adaptive-MTP logging without adaptive MTP");
+
     for (const auto k : {1U, 2U, 7U, 15U}) {
         const auto options = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
                                     "--draft-tokens", std::to_string(k), "--lm-head-draft"});
@@ -301,6 +319,8 @@ int main() {
     failures += check(serve_usage_text("ninfer-serve").find("--default-thinking-budget") !=
                           std::string::npos,
                       "serve help omits --default-thinking-budget");
+    failures += check(serve_usage_text("ninfer-serve").find("--adaptive-mtp") != std::string::npos,
+                      "serve help omits --adaptive-mtp");
     failures += check(serve_usage_text("ninfer-serve").find("--vision") != std::string::npos,
                       "serve help omits --vision");
     failures +=

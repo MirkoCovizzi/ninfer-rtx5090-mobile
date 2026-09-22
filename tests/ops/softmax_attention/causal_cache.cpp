@@ -2046,7 +2046,7 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
         failures += verify_invalid_columns_zero(label, output, geometry, width, valid);
         failures += cache.verify(label, expected);
         failures += cache.verify_untouched(label, before, positions, lanes, valid, width);
-        if (width <= 6) {
+        if (width <= 16) {
             // Supplement the independent mathematical oracle with the decode/MTP invariance
             // contract. Each scalar query uses its own exact envelope and the represented cache.
             GuardedDeviceBuffer scalar_output(q.size() * sizeof(std::uint16_t));

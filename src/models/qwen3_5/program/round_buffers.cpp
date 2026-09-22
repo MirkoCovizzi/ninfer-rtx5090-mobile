@@ -306,6 +306,41 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
     }
 }
 
+MtpDecodeState MtpDecodeState::active_view(std::uint32_t batch_capacity,
+                                           std::uint32_t active_width) const {
+    if (batch_capacity == 0 || batch_capacity > static_cast<std::uint32_t>(current_drafts.ne[1]) ||
+        active_width == 0 || active_width > static_cast<std::uint32_t>(current_drafts.ne[0])) {
+        throw std::invalid_argument("MTP active view dimensions are outside the supported domain");
+    }
+    const auto batch          = static_cast<std::int32_t>(batch_capacity);
+    const auto width          = static_cast<std::int32_t>(active_width);
+    MtpDecodeState out        = *this;
+    out.current_drafts        = Tensor(current_drafts.data, DType::I32, {width, batch});
+    out.target_rope_positions = Tensor(target_rope_positions.data, DType::I32, {width + 1, batch});
+    out.licensed_tokens       = Tensor(licensed_tokens.data, DType::I32, {width + 1, batch});
+    out.verify_ids            = Tensor(verify_ids.data, DType::I32, {width + 1, batch});
+    out.target_positions      = Tensor(target_positions.data, DType::I32, {width + 1, batch});
+    out.target_argmax         = Tensor(target_argmax.data, DType::I32, {width + 1, batch});
+    out.target_logits =
+        Tensor(target_logits.data, DType::BF16, {target_logits.ne[0], width + 1, batch});
+    out.target_hidden =
+        Tensor(target_hidden.data, DType::BF16, {target_hidden.ne[0], width + 1, batch});
+    out.target_continuation_hidden = Tensor(target_continuation_hidden.data, DType::BF16,
+                                            {target_continuation_hidden.ne[0], batch});
+    out.proposal_logits = Tensor(proposal_logits.data, DType::BF16, {proposal_logits.ne[0], batch});
+    out.alignment_ids   = Tensor(alignment_ids.data, DType::I32, {width + 1, batch});
+    out.alignment_hidden =
+        Tensor(alignment_hidden.data, DType::BF16, {alignment_hidden.ne[0], width + 1, batch});
+    out.ar_hidden         = Tensor(ar_hidden.data, DType::BF16, {ar_hidden.ne[0], batch});
+    out.next_hidden       = Tensor(next_hidden.data, DType::BF16, {next_hidden.ne[0], batch});
+    const auto steps      = std::max(width - 1, 1);
+    out.ar_positions      = Tensor(ar_positions.data, DType::I32, {batch, steps});
+    out.ar_rope_positions = Tensor(ar_rope_positions.data, DType::I32, {batch, steps});
+    out.ar_valid_columns  = Tensor(ar_valid_columns.data, DType::I32, {batch, steps});
+    out.next_drafts       = Tensor(next_drafts.data, DType::I32, {batch, width});
+    return out;
+}
+
 DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeStateLayout& layout,
                                      std::uint32_t batch_capacity, std::uint32_t draft_window) {
     if (batch_capacity == 0 || batch_capacity > kMaximumConcurrency || draft_window == 0 ||

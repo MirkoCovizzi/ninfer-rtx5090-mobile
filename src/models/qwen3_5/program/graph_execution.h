@@ -12,7 +12,7 @@ template <class Context, class Body>
 void run_prepared(Context& state, DecodeGraphExecutable* executable, Body&& body) {
     if (executable != nullptr) {
         if (!executable->ready()) {
-            throw std::logic_error("decode graph was not prepared at load time");
+            throw std::logic_error("decode graph executable is not prepared");
         }
         executable->launch(state.execution.device.stream);
     } else {

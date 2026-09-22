@@ -48,7 +48,8 @@ the runtime's conservative lower execution-envelope bound by default. `--tight-e
 uses the exact common frontier to measure launch overprovisioning on this homogeneous fixture;
 it is not a production optimization or evidence that arbitrary mixed-row graphs can use that bound.
 Explicit widths 7..16 select provisional Op calls; the default sweep remains 1..6. These wider
-H24/KV4 calls use eight-column chunks above 1,024 visible keys, not an Engine MTP depth above five.
+H24/KV4 calls use eight-column chunks above 1,024 visible keys. These are isolated Op measurements,
+not complete MTP round measurements.
 
 ```bash
 ./build/bench/ninfer_kvarn_attention_bench --context 196614 --phase provisional --width 4
@@ -172,7 +173,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
           [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4|kvarn>]
-          [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
+           [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--adaptive-mtp] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
 ```
@@ -187,9 +188,14 @@ Example:
   -p 512,2048 -n 128 -pg '2048,128' -r 5 --warmup 1
 ```
 
-Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (MTP K=1..5, DFlash/DFlash2
-K=1..15); `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
-enabled by default.
+Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (all K=1..15). For MTP, K is
+the fixed window by default and the configured maximum when `--adaptive-mtp` is present;
+`--adaptive-mtp` requires `--spec mtp`. `--lm-head-draft` selects the optimized proposal head.
+Adaptive MTP selects min(3,K), min(7,K), and K. It can probe the maximum directly after three complete
+short-prefix successes, use K7 when a maximum-width trial is unprofitable, and promote from K7 after
+sustained full acceptance and cooldown. Two complete observations compare yield with measured
+cheaper-tier execution costs. Per-window statistics retain K-1 indexing; other widths remain zero.
+CUDA Graph decode is enabled by default.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with
@@ -205,8 +211,9 @@ For a DFlash2 companion artifact:
 ```
 
 The benchmark disables context retention because every repetition is an independent root request.
-Schema v15 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
-JSON and CSV identify DFlash2 explicitly. MTP alone reserves its extra lookahead KV margin.
+Schema v16 records `speculative_backend`, `draft_tokens`, MTP draft policy, and the proposal head
+independently; JSON includes adaptive per-position and per-window counters. MTP alone reserves its
+extra lookahead KV margin.
 
 ## Context-cost calibration
 
@@ -1130,7 +1137,7 @@ cmake --build build --parallel --target ninfer_argmax_bench ninfer_sampling_sele
 ```
 
 The G2/G3/G4 benchmark uses physical rows 248320 and valid token domain 248077. G2 covers optional
-occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers one-hot MTP windows `K=1..5`.
+occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers one-hot MTP windows `K=1..15`.
 With no arguments it runs the G2/G3 greedy/stochastic matrix. G4 covers DFlash2 sparse-q acceptance
 with `K=1..15`, 16 proposal candidates, `P=0..K`, and `B=1..8`. `--drafts` defaults to the
 checkpoint recommendation of seven; the default extent is the selected K.

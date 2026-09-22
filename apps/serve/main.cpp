@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
          .presentation = ninfer::product::LogPresentation::Service});
     const std::shared_ptr<spdlog::logger> logger = logging.logger();
     ninfer::product::StartupLogRenderer startup_log(logging);
-    ninfer::serve::OperationalLog operational_log(logger);
+    ninfer::serve::OperationalLog operational_log(logger, options.log_adaptive_mtp_stats);
     bool serving = false;
 
     try {

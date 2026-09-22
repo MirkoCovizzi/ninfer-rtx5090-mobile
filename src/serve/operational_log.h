@@ -28,7 +28,8 @@ struct OperationalRecord {
 [[nodiscard]] OperationalRecord render_request_start(const RequestLogContext& context);
 [[nodiscard]] OperationalRecord render_request_rejected(const RequestRejectionLogContext& context);
 [[nodiscard]] OperationalRecord render_request_done(const RequestLogContext& context,
-                                                    const GenerationOutcome& outcome);
+                                                    const GenerationOutcome& outcome,
+                                                    bool log_adaptive_mtp_stats = false);
 [[nodiscard]] std::optional<OperationalRecord>
 render_tool_call_fallback(const RequestLogContext& context, const GenerationOutcome& outcome);
 [[nodiscard]] OperationalRecord render_request_failure(const RequestLogContext& context,
@@ -39,7 +40,8 @@ render_tool_call_fallback(const RequestLogContext& context, const GenerationOutc
 
 class OperationalLog {
 public:
-    explicit OperationalLog(std::shared_ptr<spdlog::logger> logger);
+    explicit OperationalLog(std::shared_ptr<spdlog::logger> logger,
+                            bool log_adaptive_mtp_stats = false);
 
     void request_start(const RequestLogContext& context) const;
     void request_rejected(const RequestRejectionLogContext& context) const;
@@ -64,6 +66,7 @@ private:
     void write(OperationalRecord record) const;
 
     std::shared_ptr<spdlog::logger> logger_;
+    bool log_adaptive_mtp_stats_ = false;
 };
 
 } // namespace ninfer::serve

@@ -373,7 +373,7 @@ Bf16GdnNormGatingPlan bf16_gdn_norm_gating_resolve_plan(const Bf16GdnGatingProbl
     Bf16GdnGatingPlan control            = bf16_gdn_gating_resolve_plan(problem);
     Bf16GdnNormGatingScheduleId schedule = Bf16GdnNormGatingScheduleId::Composed;
     std::int32_t norm_splits             = 0;
-    if (is_27(problem) && problem.cols <= 48)
+    if (is_27(problem) && problem.cols <= 128)
         return {Bf16GdnNormGatingScheduleId::FusedSimt27, control, 0};
     if (is_35(problem) && problem.cols <= 16) {
         control  = bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId::MmaCooperativeSplit32,
@@ -393,8 +393,8 @@ std::size_t bf16_gdn_norm_gating_capacity_workspace_bytes(std::int32_t heads,
     std::size_t maximum =
         bf16_gdn_gating_capacity_workspace_bytes(heads, input_rows, min_cols, max_cols);
     if (heads == 48 && input_rows == 5120) {
-        if (max_cols <= 48) return 0;
-        return bf16_gdn_gating_capacity_workspace_bytes(heads, input_rows, std::max(min_cols, 49),
+        if (max_cols <= 128) return 0;
+        return bf16_gdn_gating_capacity_workspace_bytes(heads, input_rows, std::max(min_cols, 129),
                                                         max_cols);
     }
     if (heads == 32 && input_rows == 2048 && min_cols <= 16) {

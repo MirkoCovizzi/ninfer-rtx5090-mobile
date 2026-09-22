@@ -759,6 +759,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     if (!replay_fold) {
         throw std::logic_error("speculative pending batch has no ReplaySSM records");
     }
+    const std::uint32_t mtp_round_width = speculative_backend == SpeculativeBackend::Mtp
+                                              ? requests[lanes.front()].pending.mtp_draft_window
+                                              : draft_window;
 
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
@@ -805,7 +808,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     try {
         timing.resume_submit();
         replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+                             static_cast<std::int32_t>(mtp_round_width + 1U), device.stream);
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
@@ -832,11 +835,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             Tensor selected;
             Tensor destinations;
             if (speculative_backend == SpeculativeBackend::Mtp && io.mtp_decode) {
-                qwen3_5::MtpDecodeState& frame = *io.mtp_decode;
-                selector_tensor                = frame.current_extents.slice(0, 0, batch);
-                hidden                         = frame.target_hidden.slice(2, 0, batch);
-                selected     = frame.target_continuation_hidden.slice(1, 0, batch);
-                destinations = frame.state_destination_slots.slice(0, 0, batch);
+                qwen3_5::MtpDecodeState frame =
+                    io.mtp_decode->active_view(max_concurrency, mtp_round_width);
+                selector_tensor = frame.current_extents.slice(0, 0, batch);
+                hidden          = frame.target_hidden.slice(2, 0, batch);
+                selected        = frame.target_continuation_hidden.slice(1, 0, batch);
+                destinations    = frame.state_destination_slots.slice(0, 0, batch);
             } else if (is_masked_draft_backend(speculative_backend) && io.dflash_decode) {
                 qwen3_5::DFlashDecodeState& frame = *io.dflash_decode;
                 selector_tensor                   = frame.proposal_extents.slice(0, 0, batch);
@@ -890,7 +894,14 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     }
 
     const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
-    const std::uint32_t width = draft_window + 1U;
+    const bool observe_mtp =
+        mtp_controller &&
+        std::none_of(terminal.begin(), terminal.end(), [](bool value) { return value; }) &&
+        std::none_of(cancelled.begin(), cancelled.end(), [](bool value) { return value; });
+    const double mtp_execution_seconds =
+        observe_mtp ? requests[lanes.front()].pending.mtp_execution_seconds : 0;
+    const std::uint32_t width =
+        speculative_backend == SpeculativeBackend::Mtp ? mtp_round_width + 1U : draft_window + 1U;
     try {
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence = active_sequence(lanes[row]);
@@ -920,6 +931,10 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             sequence.tail_hidden_valid  = true;
 
             if (speculative_backend == SpeculativeBackend::Mtp) {
+                request.speculative_stats.window_stats[mtp_round_width - 1U].committed_tokens +=
+                    committed;
+                request.speculative_stats.window_stats[mtp_round_width - 1U].decode_seconds +=
+                    tail_seconds;
                 sequence.mtp_kv_valid = sequence.execution_frontier;
                 if (terminal[row]) {
                     sequence.mtp_draft_count = 0;
@@ -930,6 +945,10 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                         sequence.mtp_drafts[step] =
                             mtp_host_egress->next_drafts[step * max_concurrency + row];
                     }
+                }
+                if (mtp_controller) {
+                    request.mtp_signal.observe(mtp_host_ingress->current_extents[row],
+                                               mtp_host_egress->accepted_drafts[row]);
                 }
             } else {
                 sequence.dflash_context_frontier =
@@ -945,6 +964,13 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             }
             request.pending = {};
             request.timings.decode_seconds += tail_seconds;
+        }
+        if (observe_mtp) {
+            mtp_controller->observe_execution(
+                mtp_round_width, {mtp_host_ingress->current_extents.data(), lanes.size()},
+                {mtp_host_egress->accepted_drafts.data(), lanes.size()},
+                mtp_execution_seconds +
+                    std::chrono::duration<double>(Clock::now() - tail_started).count());
         }
     } catch (...) {
         clear_execution_failure_lanes(lanes);

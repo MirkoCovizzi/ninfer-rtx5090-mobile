@@ -76,11 +76,18 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash2,
 };
 
+enum class MtpDraftPolicy : std::uint8_t {
+    Fixed,
+    Adaptive,
+};
+
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
-    // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
-    std::uint32_t draft_tokens = 0;
-    ProposalHead proposal_head = ProposalHead::Full;
+    // Fixed MTP uses this as K; adaptive MTP selects min(3,K), min(7,K), or K. DFlash and
+    // DFlash2 always use a fixed K. All speculative backends accept K in [1,15].
+    std::uint32_t draft_tokens      = 0;
+    ProposalHead proposal_head      = ProposalHead::Full;
+    MtpDraftPolicy mtp_draft_policy = MtpDraftPolicy::Fixed;
 };
 
 enum class StartupPhase : std::uint8_t {
@@ -673,15 +680,30 @@ struct GenerationEngineTiming {
     std::uint64_t control_units                 = 0;
 };
 
+struct SpeculativeWindowStats {
+    std::uint64_t rounds           = 0;
+    std::uint64_t fallback_steps   = 0;
+    std::uint64_t drafted_tokens   = 0;
+    std::uint64_t accepted_tokens  = 0;
+    std::uint64_t committed_tokens = 0;
+    double decode_seconds          = 0.0;
+};
+
 struct SpeculativeStats {
-    SpeculativeBackend backend    = SpeculativeBackend::None;
-    bool enabled                  = false;
-    std::uint32_t draft_window    = 0;
-    std::uint64_t rounds          = 0;
-    std::uint64_t drafted_tokens  = 0;
-    std::uint64_t accepted_tokens = 0;
-    std::uint64_t fallback_steps  = 0;
+    SpeculativeBackend backend       = SpeculativeBackend::None;
+    bool enabled                     = false;
+    std::uint32_t draft_window       = 0;
+    MtpDraftPolicy mtp_draft_policy  = MtpDraftPolicy::Fixed;
+    std::uint64_t rounds             = 0;
+    std::uint64_t drafted_tokens     = 0;
+    std::uint64_t accepted_tokens    = 0;
+    std::uint64_t fallback_steps     = 0;
+    std::uint64_t window_transitions = 0;
     std::vector<std::uint64_t> accepted_per_position;
+    std::vector<std::uint64_t> drafted_per_position;
+    // Indexed by K-1. Each entry includes the full physical round and settlement time for that
+    // window; these values are per-request observations and are not additive across requests.
+    std::vector<SpeculativeWindowStats> window_stats;
 };
 
 struct ThinkingBudgetStats {

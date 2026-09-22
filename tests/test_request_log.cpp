@@ -52,6 +52,7 @@ int main() {
     options.kv_cache                       = ninfer::KvCacheStorage::Fp8E4M3Row256;
     options.speculative.backend            = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens       = 3;
+    options.speculative.mtp_draft_policy   = ninfer::MtpDraftPolicy::Adaptive;
     options.speculative.proposal_head      = ninfer::ProposalHead::Optimized;
     options.enable_vision                  = false;
     options.allow_prefix_reuse             = true;
@@ -203,6 +204,8 @@ int main() {
     failures += check(server.at("engine").at("vision") == false, "Vision state missing");
     failures += check(server.at("engine").at("speculative_backend") == "mtp",
                       "speculative backend missing");
+    failures +=
+        check(server.at("engine").at("mtp_draft_policy") == "adaptive", "MTP draft policy missing");
     failures +=
         check(server.at("engine").at("proposal_head") == "optimized", "proposal head missing");
     failures += check(
@@ -398,33 +401,50 @@ int main() {
                   .decode_rounds                        = 2,
                   .control_units                        = 1,
     };
-    outcome.metrics.speculative_backend               = ninfer::SpeculativeBackend::Mtp;
-    outcome.metrics.speculative_draft_window          = 3;
-    outcome.metrics.speculative_rounds                = 300;
-    outcome.metrics.speculative_draft_tokens          = 900;
-    outcome.metrics.speculative_accepted_tokens       = 720;
-    outcome.metrics.speculative_fallback_steps        = 2;
-    outcome.metrics.speculative_accepted_per_position = {290, 240, 190};
-    outcome.metrics.materialization                   = {
-                          .predicted_now_ns           = 200000,
-                          .predicted_future_loss_ns   = 50000,
-                          .predicted_total_ns         = 250000,
-                          .targets_evaluated          = 7,
-                          .projection_work            = 31,
-                          .planning_elapsed_ns        = 9000,
-                          .search_elapsed_ns          = 6000,
-                          .stop_reason                = ninfer::MaterializationStopReason::QueueExhausted,
-                          .budget_exhausted           = false,
-                          .selected_degradation_units = 2,
-                          .selected_maximal_fallback  = false,
-                          .initial_predicted_total_ns = 500000,
-                          .first_improvement_ns       = 2000,
-                          .incumbent_improvements     = 2,
-                          .search_work                = 42,
-                          .search_granted_ns          = 8000,
-                          .search_renewals            = 1,
-                          .search_discovery_used      = true,
-                          .search_overshoot_ns        = 0,
+    outcome.metrics.speculative.backend               = ninfer::SpeculativeBackend::Mtp;
+    outcome.metrics.speculative.draft_window          = 3;
+    outcome.metrics.speculative.mtp_draft_policy      = ninfer::MtpDraftPolicy::Adaptive;
+    outcome.metrics.speculative.rounds                = 300;
+    outcome.metrics.speculative.drafted_tokens        = 900;
+    outcome.metrics.speculative.accepted_tokens       = 720;
+    outcome.metrics.speculative.fallback_steps        = 2;
+    outcome.metrics.speculative.window_transitions    = 4;
+    outcome.metrics.speculative.accepted_per_position = {290, 240, 190};
+    outcome.metrics.speculative.drafted_per_position  = {300, 280, 220};
+    outcome.metrics.speculative.window_stats          = {
+        {.rounds           = 100,
+                  .fallback_steps   = 1,
+                  .drafted_tokens   = 300,
+                  .accepted_tokens  = 240,
+                  .committed_tokens = 340,
+                  .decode_seconds   = 1.25},
+        {.rounds           = 200,
+                  .fallback_steps   = 1,
+                  .drafted_tokens   = 600,
+                  .accepted_tokens  = 480,
+                  .committed_tokens = 680,
+                  .decode_seconds   = 4.0},
+    };
+    outcome.metrics.materialization = {
+        .predicted_now_ns           = 200000,
+        .predicted_future_loss_ns   = 50000,
+        .predicted_total_ns         = 250000,
+        .targets_evaluated          = 7,
+        .projection_work            = 31,
+        .planning_elapsed_ns        = 9000,
+        .search_elapsed_ns          = 6000,
+        .stop_reason                = ninfer::MaterializationStopReason::QueueExhausted,
+        .budget_exhausted           = false,
+        .selected_degradation_units = 2,
+        .selected_maximal_fallback  = false,
+        .initial_predicted_total_ns = 500000,
+        .first_improvement_ns       = 2000,
+        .incumbent_improvements     = 2,
+        .search_work                = 42,
+        .search_granted_ns          = 8000,
+        .search_renewals            = 1,
+        .search_discovery_used      = true,
+        .search_overshoot_ns        = 0,
     };
     outcome.thinking = ninfer::ThinkingBudgetStats{.configured_budget     = 256,
                                                    .model_thinking_tokens = 256,
@@ -470,6 +490,8 @@ int main() {
         check(done.at("timings_seconds").at("ttft").get<double>() == outcome.metrics.ttft_seconds,
               "TTFT missing or lost precision");
     failures += check(done.at("speculative").at("backend") == "mtp", "speculative backend missing");
+    failures += check(done.at("speculative").at("mtp_draft_policy") == "adaptive",
+                      "MTP draft policy missing");
     failures +=
         check(done.at("speculative").at("draft_window") == 3, "speculative draft window missing");
     failures += check(done.at("speculative").at("fallback_steps") == 2,
@@ -477,6 +499,14 @@ int main() {
     failures +=
         check(done.at("speculative").at("accepted_per_position") == Json::array({290, 240, 190}),
               "speculative position counts missing");
+    failures +=
+        check(done.at("speculative").at("drafted_per_position") == Json::array({300, 280, 220}) &&
+                  done.at("speculative").at("window_transitions") == 4,
+              "adaptive speculative counters missing");
+    failures +=
+        check(done.at("speculative").at("window_stats").at(1).at("committed_tokens") == 680 &&
+                  done.at("speculative").at("window_stats").at(0).at("decode_seconds") == 1.25,
+              "adaptive per-window stats missing");
     failures += check(done.at("materialization").at("predicted_total_ns") == 250000 &&
                           done.at("materialization").at("targets_evaluated") == 7 &&
                           done.at("materialization").at("stop_reason") == "queue_exhausted" &&
@@ -498,6 +528,10 @@ int main() {
             "(25.2%, response replay) | TTFT 358 ms | total 5.7s | prefill 1.28k tok/s | "
             "decode 191.4 tok/s | mtp accepted 720/900 (80.0%) | thinking 256/256, control 19",
         "pretty request-done record mismatch");
+    const OperationalRecord pretty_adaptive = render_request_done(context, outcome, true);
+    failures += check(pretty_adaptive.message.find(
+                          "adaptive windows K1=100,K2=200 transitions 4") != std::string::npos,
+                      "adaptive per-window operational detail missing");
 
     GenerationOutcome normalized_tool_outcome = outcome;
     normalized_tool_outcome.tool_calls.push_back(

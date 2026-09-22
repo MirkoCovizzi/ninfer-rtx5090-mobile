@@ -10,6 +10,8 @@
 namespace ninfer::ops::detail {
 namespace {
 
+constexpr std::int32_t kMaximumDecodeColumns = 8 * 16;
+
 enum class Nvfp4LinearAddRoute : std::uint8_t {
     A16,
     A4,
@@ -24,10 +26,11 @@ Nvfp4LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_r
         return Nvfp4LinearAddRoute::A16;
     }
     if (!allows_a4(policy)) { throw std::invalid_argument("nvfp4 linear_add: unsupported policy"); }
-    // MLP down uses A4 at every width; GDN output keeps its canonical A16 profile
-    // through eight requests times six target-verification columns.
-    return input_rows == 17408 || tokens > 8 * 6 ? Nvfp4LinearAddRoute::A4
-                                                 : Nvfp4LinearAddRoute::A16;
+    // MLP down projection consumes the represented A4 activation at every execution width. GDN
+    // output keeps one A16 reduction profile across every compact decode batch: at most eight
+    // requests times sixteen target-verification columns.
+    if (input_rows == 17408 || tokens > kMaximumDecodeColumns) { return Nvfp4LinearAddRoute::A4; }
+    return Nvfp4LinearAddRoute::A16;
 }
 
 

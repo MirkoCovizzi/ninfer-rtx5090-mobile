@@ -59,6 +59,7 @@ class Point:
     sampling_mode: str
     suite: str
     concurrency: int
+    adaptive_mtp: bool = False
 
     @property
     def key(self) -> str:
@@ -205,6 +206,7 @@ def build_points(
                             sampling_mode=args.sampling,
                             suite=suite,
                             concurrency=concurrency,
+                            adaptive_mtp=mode_name == "mtp3_adaptive",
                         )
                     )
     return points
@@ -318,6 +320,8 @@ def server_command(
                 "--lm-head-draft",
             ]
         )
+        if point.adaptive_mtp:
+            command.append("--adaptive-mtp")
     if point.sampling_mode == "greedy":
         command.append("--greedy")
     else:
@@ -360,6 +364,7 @@ def validate_server_start(
         "prefix_reuse": False,
         "speculative_backend": point.speculative_backend,
         "speculative_draft_window": point.draft_tokens,
+        "mtp_draft_policy": "adaptive" if point.adaptive_mtp else "fixed",
         "proposal_head": "optimized" if point.draft_tokens else "full",
     }
     actual = {name: engine.get(name) for name in expected}
@@ -738,6 +743,7 @@ def analyze_point(
         "speculative_mode": point.speculative_mode,
         "speculative_backend": point.speculative_backend,
         "draft_tokens": point.draft_tokens,
+        "adaptive_mtp": point.adaptive_mtp,
         "sampling_mode": point.sampling_mode,
         "suite": point.suite,
         "workload_order": workload_order(point),
@@ -802,6 +808,7 @@ def run_point(
                         sampling_mode=point.sampling_mode,
                         fixture=job.fixture,
                         seed=job.seed,
+                        adaptive_mtp=point.adaptive_mtp,
                     )
                     record = corpus.build_result_record(
                         spec, prefill_signature, request_payload(point, job), response, event

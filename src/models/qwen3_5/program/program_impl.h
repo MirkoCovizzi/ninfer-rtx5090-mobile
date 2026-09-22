@@ -1,5 +1,6 @@
 #pragma once
 #include "models/qwen3_5/program/internal.h"
+#include "models/qwen3_5/program/speculative/mtp_adaptive.h"
 
 #include "core/arena.h"
 #include "core/gdn_replay_records.h"
@@ -274,11 +275,13 @@ enum class PendingKind : std::uint8_t {
 };
 
 struct PendingCandidate {
-    PendingKind kind            = PendingKind::None;
-    std::uint32_t base_E        = 0;
-    std::uint32_t base_S        = 0;
-    std::uint32_t prompt_tokens = 0;
-    std::uint32_t produced      = 0;
+    PendingKind kind               = PendingKind::None;
+    std::uint32_t base_E           = 0;
+    std::uint32_t base_S           = 0;
+    std::uint32_t prompt_tokens    = 0;
+    std::uint32_t produced         = 0;
+    std::uint32_t mtp_draft_window = 0;
+    double mtp_execution_seconds   = 0;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -325,6 +328,7 @@ struct DecodeGraphProfile {
     std::uint32_t min_execution_frontier = 0;
     std::uint32_t max_execution_frontier = 0;
     std::uint32_t topology_class         = 0;
+    std::uint32_t mtp_draft_window       = 0;
     DecodeGraphDefinition definition;
 };
 
@@ -403,6 +407,8 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    MtpAdaptiveSignal mtp_signal;
+    std::uint32_t mtp_active_window = 0;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -569,6 +575,7 @@ public:
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
     const SpeculativeBackend speculative_backend;
+    const MtpDraftPolicy mtp_draft_policy;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
     const bool vision_enabled;
@@ -613,6 +620,7 @@ public:
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
     DecodeGraphFamily dflash_graphs;
+    std::optional<MtpAdaptiveBatchController> mtp_controller;
 
     std::optional<PinnedHostBuffer> round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;
@@ -1131,6 +1139,7 @@ private:
     void release_sequence_state_strict(SequenceState& sequence) noexcept;
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
+    void capture_mtp_graph(DecodeGraphProfile& profile);
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config);
     void set_device_i32(Tensor& tensor, std::int32_t value);

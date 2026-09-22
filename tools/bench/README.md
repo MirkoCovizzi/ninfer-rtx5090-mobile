@@ -89,8 +89,9 @@ binary:   build/bench/ninfer_bench
 corpus:   bench/fixtures/bench_corpus.ids
 ```
 
-The matrix treats MTP `k=3` with the optimized proposal head as the primary path, keeps `k=0` and
-`k=5` as controls, and sweeps `k=0..5` on representative context-decode cases. Decode-bearing cases
+The matrix treats fixed MTP `k=3` with the optimized proposal head as the primary path, keeps `k=0`
+and `k=5` as controls, and sweeps fixed and adaptive configured maxima through `k=15` on
+representative context-decode cases. Decode-bearing cases
 cover CUDA Graph and eager execution; prefill-only cases vary prompt length and prefill chunk.
 
 ```bash
@@ -126,13 +127,14 @@ Use `--resume` to skip completed JSON reports in an existing `--output-dir`, and
 for a minimal script/runner check. `--no-build` uses the binary supplied by `--bench` without
 building it.
 
-Each raw report must be `ninfer_bench_report` schema v15. The flattened summary and schema-v4 matrix
+Each raw report must be `ninfer_bench_report` schema v16. The flattened summary and schema-v4 matrix
 manifest carry native facts from the report: architecture, public name, actual formats, prefill signature, artifact,
 load/read/upload/staging values, Engine memory arenas including the non-additive Vision layout
 inside the unified workspace and CUDA Graph allowance, per-test planned logical and
 allocator-observed workspace peaks, KV capacity and
 payload, configured proposal head and graph mode, phase timings and throughput, and speculative
-rounds/drafts/acceptance/fallbacks. The matrix manifest is descriptive and records the commands and
+rounds/drafts/acceptance/fallbacks, including adaptive policy and per-window data. The matrix manifest
+is descriptive and records the commands and
 selected local inputs; it does not make repository state part of report validity.
 
 ## Serving corpus benchmark
@@ -144,7 +146,8 @@ runner usage and output files.
 
 `run_serve_corpus.py` accepts explicit `--artifact LABEL=PATH` entries. Labels identify report groups;
 the selected artifact supplies the architecture, public name and weight bindings.
-Omitting `--mode` selects MTP0 and MTP3; repeat `--mode` to select a subset. Use `dflash7` for
+Omitting `--mode` selects MTP0 and MTP3; repeat `--mode` to select a subset. Use `mtp3_adaptive` for
+adaptive MTP up to K=3, or `dflash7` for
 Qwen3.6-35B-A3B DFlash K=7 and `dflash2_7` for Qwen3.8-27B DFlash2 K=7, with companion weights
 in the selected artifact. `--sampling greedy` selects exact argmax; the default is stochastic.
 Run commands with a selected Python 3.11 interpreter, as in the model-page reproduction entries.
@@ -154,7 +157,8 @@ The serial runner writes `run.jsonl`, `summary.csv`, `summary.md`, and per-serve
 category summaries. The output directory is supplied explicitly with `--output`.
 
 Its schema-v7 result and flattened summaries retain the actual `prefill_signature`, request Host
-exposure, and decode Host/Device-wait time per round received from the schema-v21 serving records.
+exposure, adaptive policy, and decode Host/Device-wait time per round received from the schema-v22
+serving records.
 Request exposure is a latency distribution value and is never summed across concurrent requests;
 worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do

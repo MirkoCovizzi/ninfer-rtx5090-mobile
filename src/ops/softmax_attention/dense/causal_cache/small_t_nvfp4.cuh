@@ -618,7 +618,7 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_nvfp4_reduce_out
     }
     if constexpr (Offset) positions += column_begin;
     if constexpr (MultiBatch) positions += static_cast<std::int64_t>(batch) * full_width;
-    const bool independent = tokens <= 6;
+    const bool independent = tokens <= 16;
     const int window       = positions[independent ? token : tokens - 1] + 1;
     int output_column      = token;
     if constexpr (Offset) output_column += column_begin;

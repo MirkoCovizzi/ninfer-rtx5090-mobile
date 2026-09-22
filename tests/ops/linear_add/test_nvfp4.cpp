@@ -219,6 +219,29 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
             }
         }
         failures += verify_reduction(label, actual, expected, a4 ? kA4Tolerance : kA16Tolerance);
+
+        if (k == 6144 && invocation.tokens == 32 && !a4) {
+            // Supplement the independent oracle with the width-invariance required by greedy
+            // speculative verification: all columns must match ordinary one-column updates.
+            output.copy_from_host(initial_residual.data(), output.bytes());
+            for (std::int32_t token = 0; token < invocation.tokens; ++token) {
+                Tensor single_x(static_cast<std::uint16_t*>(device_activation.data()) +
+                                    static_cast<std::size_t>(token) * k,
+                                DType::BF16, {k, 1});
+                Tensor single_out(static_cast<std::uint16_t*>(output.data()) +
+                                      static_cast<std::size_t>(token) * n,
+                                  DType::BF16, {n, 1});
+                ops::linear_add(single_x, weight, single_out, invocation.policy, workspace,
+                                nullptr);
+            }
+            cuda_check(cudaDeviceSynchronize(), "synchronize one-column NVFP4 linear_add");
+            std::vector<std::uint16_t> single_bits(output_words);
+            output.copy_to_host(single_bits.data(), output.bytes());
+            if (single_bits != actual_bits) {
+                std::cerr << label << ": batched residual differs from one-column updates\n";
+                ++failures;
+            }
+        }
     }
 
     failures += device_activation.verify_guards("NVFP4 linear_add activation");

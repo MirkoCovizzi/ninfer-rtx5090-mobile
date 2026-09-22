@@ -231,9 +231,11 @@ OperationalRecord render_request_rejected(const RequestRejectionLogContext& cont
 }
 
 OperationalRecord render_request_done(const RequestLogContext& context,
-                                      const GenerationOutcome& outcome) {
-    const GenerationMetrics& metrics     = outcome.metrics;
-    const double computed_prefill_tokens = static_cast<double>(
+                                      const GenerationOutcome& outcome,
+                                      bool log_adaptive_mtp_stats) {
+    const GenerationMetrics& metrics            = outcome.metrics;
+    const ninfer::SpeculativeStats& speculative = metrics.speculative;
+    const double computed_prefill_tokens        = static_cast<double>(
         std::max(0, outcome.prompt_tokens - static_cast<int>(metrics.prefix_cache_hit_tokens)));
     const double decode_tokens =
         outcome.completion_tokens > 0 ? static_cast<double>(outcome.completion_tokens - 1) : 0.0;
@@ -274,13 +276,26 @@ OperationalRecord render_request_done(const RequestLogContext& context,
         out << " | decode "
             << product::format_pretty_rate(decode_tokens / metrics.decode_seconds, "tok");
     }
-    if (metrics.speculative_draft_tokens != 0) {
-        const double acceptance = static_cast<double>(metrics.speculative_accepted_tokens) /
-                                  static_cast<double>(metrics.speculative_draft_tokens);
-        out << " | " << product::speculative_backend_name(metrics.speculative_backend)
-            << " accepted " << product::format_pretty_count(metrics.speculative_accepted_tokens)
-            << '/' << product::format_pretty_count(metrics.speculative_draft_tokens) << " ("
+    if (speculative.drafted_tokens != 0) {
+        const double acceptance = static_cast<double>(speculative.accepted_tokens) /
+                                  static_cast<double>(speculative.drafted_tokens);
+        out << " | " << product::speculative_backend_name(speculative.backend) << " accepted "
+            << product::format_pretty_count(speculative.accepted_tokens) << '/'
+            << product::format_pretty_count(speculative.drafted_tokens) << " ("
             << product::format_pretty_percent(acceptance) << ')';
+    }
+    if (log_adaptive_mtp_stats && speculative.backend == ninfer::SpeculativeBackend::Mtp &&
+        speculative.mtp_draft_policy == ninfer::MtpDraftPolicy::Adaptive) {
+        out << " | adaptive windows";
+        bool has_window = false;
+        for (std::size_t i = 0; i < speculative.window_stats.size(); ++i) {
+            const auto& window = speculative.window_stats[i];
+            if (window.rounds == 0) { continue; }
+            out << (has_window ? "," : " ") << "K" << (i + 1) << "=" << window.rounds;
+            has_window = true;
+        }
+        if (!has_window) { out << " none"; }
+        out << " transitions " << speculative.window_transitions;
     }
     if (outcome.thinking.configured_budget) {
         out << " | thinking "
@@ -383,8 +398,8 @@ OperationalRecord render_throughput(const ThroughputReport& report) {
     return {.severity = OperationalSeverity::Info, .message = out.str()};
 }
 
-OperationalLog::OperationalLog(std::shared_ptr<spdlog::logger> logger)
-    : logger_(std::move(logger)) {}
+OperationalLog::OperationalLog(std::shared_ptr<spdlog::logger> logger, bool log_adaptive_mtp_stats)
+    : logger_(std::move(logger)), log_adaptive_mtp_stats_(log_adaptive_mtp_stats) {}
 
 void OperationalLog::write(OperationalRecord record) const {
     switch (record.severity) {
@@ -410,7 +425,7 @@ void OperationalLog::request_rejected(const RequestRejectionLogContext& context)
 
 void OperationalLog::request_done(const RequestLogContext& context,
                                   const GenerationOutcome& outcome) const {
-    write(render_request_done(context, outcome));
+    write(render_request_done(context, outcome, log_adaptive_mtp_stats_));
     if (std::optional<OperationalRecord> fallback = render_tool_call_fallback(context, outcome)) {
         write(std::move(*fallback));
     }

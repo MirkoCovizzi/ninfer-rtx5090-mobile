@@ -62,7 +62,7 @@ std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t capacit
 std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
                                                       std::uint32_t draft_window) {
     if (draft_window == 0 || capacity == 0) { return {}; }
-    // Bound the final AR window E+2K at split-policy transitions until the grid reaches its cap.
+    // Verification and the next proposal chain use the same active K. Bound E+2K.
     std::vector<std::uint32_t> ends;
     const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {
         if (visible_end >= offset) { ends.push_back(visible_end - offset); }
@@ -70,25 +70,21 @@ std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
     for (const std::uint32_t visible_end : {128U, 512U, 2048U, 4096U, 8198U, 16390U, 32768U}) {
         add_shifted(visible_end, 2 * draft_window);
     }
-    // Target verify and MTP batch both have T=K+1 and W=E+K+1. Preserve one concrete INT8
-    // implementation per range at the T=4/5/6 launch boundaries.
-    if (draft_window == 3) {
-        add_shifted(1029, draft_window + 1);
-    } else if (draft_window == 4) {
-        for (const std::uint32_t visible_end : {128U, 512U, 1029U}) {
-            add_shifted(visible_end, draft_window + 1);
-        }
-    } else if (draft_window == 5) {
-        for (const std::uint32_t visible_end : {128U, 160U, 2054U, 8198U}) {
-            add_shifted(visible_end, draft_window + 1);
-        }
-    }
     // KVarN verification changes route at 1K and width-one AR changes splits at 120K.
     add_shifted(1024U, draft_window + 1);
     add_shifted(122880U, 2 * draft_window);
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
-    return graph_profiles_through(capacity - 1, ends);
+    auto profiles = graph_profiles_through(capacity - 1, ends);
+    // KVarN H24 verification uses six-column chunks below 1K and a single packed block above
+    // it. Wider verification therefore changes graph node count at this boundary, not just
+    // launch parameters. Keep these definitions in distinct executable-update classes.
+    for (auto& profile : profiles) {
+        const auto visible = std::min<std::uint64_t>(
+            capacity, static_cast<std::uint64_t>(profile.max) + draft_window + 1);
+        profile.topology_class = draft_window >= 6 && visible > 1024 ? 1U : 0U;
+    }
+    return profiles;
 }
 
 std::vector<GraphExecutionProfile> dflash_graph_profiles(SpeculativeBackend backend,

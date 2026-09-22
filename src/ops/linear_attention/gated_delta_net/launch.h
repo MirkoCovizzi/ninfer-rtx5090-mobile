@@ -45,6 +45,6 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
 
 void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
-                        cudaStream_t stream);
+                        std::int32_t active_width, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail::gated_delta_net

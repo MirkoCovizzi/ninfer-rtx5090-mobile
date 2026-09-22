@@ -25,6 +25,7 @@ MANIFEST_PATH = REPO_ROOT / "examples/cli/manifest.json"
 SPECULATIVE_MODES = {
     "mtp0": ("none", 0),
     "mtp3": ("mtp", 3),
+    "mtp3_adaptive": ("mtp", 3),
     "dflash7": ("dflash", 7),
     "dflash2_7": ("dflash2", 7),
 }
@@ -79,7 +80,7 @@ WARMUP_FIXTURE = "text_smoke_zh"
 RUN_ARTIFACT_TYPE = "ninfer_serve_corpus_result"
 RUN_SCHEMA_VERSION = 7
 SERVER_LOG_ARTIFACT_TYPE = "ninfer_serve_request_log"
-SERVER_LOG_SCHEMA_VERSION = 21
+SERVER_LOG_SCHEMA_VERSION = 22
 STARTUP_TIMEOUT_SECONDS = 1800.0
 REQUEST_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
 LOG_EVENT_TIMEOUT_SECONDS = 10.0
@@ -106,6 +107,7 @@ class RunSpec:
     sampling_mode: str
     fixture: Fixture
     seed: int
+    adaptive_mtp: bool = False
 
     @property
     def key(self) -> tuple[str, str, str, str, int]:
@@ -394,6 +396,7 @@ def build_specs(
                             sampling_mode=sampling_mode,
                             fixture=fixtures[fixture_name],
                             seed=seed,
+                            adaptive_mtp=mode_name == "mtp3_adaptive",
                         )
                     )
     return specs
@@ -475,6 +478,7 @@ def validate_server_start(event: dict[str, Any], spec: RunSpec, device: int) -> 
         "prefix_reuse": engine.get("prefix_reuse"),
         "speculative_backend": engine.get("speculative_backend"),
         "speculative_draft_window": engine.get("speculative_draft_window"),
+        "mtp_draft_policy": engine.get("mtp_draft_policy", "fixed"),
         "proposal_head": engine.get("proposal_head"),
     }
     expected = {
@@ -487,6 +491,7 @@ def validate_server_start(event: dict[str, Any], spec: RunSpec, device: int) -> 
         "prefix_reuse": False,
         "speculative_backend": spec.speculative_backend,
         "speculative_draft_window": spec.draft_tokens,
+        "mtp_draft_policy": "adaptive" if spec.adaptive_mtp else "fixed",
         "proposal_head": "optimized" if spec.draft_tokens else "full",
     }
     if actual != expected:
@@ -556,6 +561,7 @@ def build_result_record(
         decode_seconds = float(timings["decode"])
         total_seconds = float(timings["total"])
         backend = str(speculative["backend"])
+        mtp_draft_policy = str(speculative.get("mtp_draft_policy", "fixed"))
         speculative_rounds = int(speculative["rounds"])
         drafted_tokens = int(speculative["drafted_tokens"])
         accepted_tokens = int(speculative["accepted_tokens"])
@@ -593,6 +599,11 @@ def build_result_record(
             f"request_done speculative backend {backend!r} != "
             f"{spec.speculative_backend!r}"
         )
+    expected_policy = "adaptive" if spec.adaptive_mtp else "fixed"
+    if mtp_draft_policy != expected_policy:
+        raise CampaignError(
+            f"request_done MTP draft policy {mtp_draft_policy!r} != {expected_policy!r}"
+        )
 
     usage = response.get("usage", {})
     if (
@@ -618,6 +629,7 @@ def build_result_record(
         "speculative_rounds": speculative_rounds,
         "drafted_tokens": drafted_tokens,
         "accepted_tokens": accepted_tokens,
+        "mtp_draft_policy": mtp_draft_policy,
         "speculative_acceptance": safe_ratio(float(accepted_tokens), float(drafted_tokens)),
         "speculative_tokens_per_round": (
             1.0 + accepted_tokens / speculative_rounds if speculative_rounds > 0 else None
@@ -659,6 +671,7 @@ def build_result_record(
         "speculative_mode": spec.speculative_mode,
         "speculative_backend": spec.speculative_backend,
         "draft_tokens": spec.draft_tokens,
+        "adaptive_mtp": spec.adaptive_mtp,
         "sampling_mode": spec.sampling_mode,
         "request": payload,
         "response": response,
@@ -761,6 +774,8 @@ def server_command(
                 "--lm-head-draft",
             ]
         )
+        if spec.adaptive_mtp:
+            command.append("--adaptive-mtp")
     if spec.sampling_mode == "greedy":
         command.append("--greedy")
     else:
@@ -1080,6 +1095,8 @@ def mode_display_name(mode_name: str) -> str:
         return "MTP0"
     if mode_name == "mtp3":
         return "MTP3"
+    if mode_name == "mtp3_adaptive":
+        return "MTP3 adaptive"
     if mode_name == "dflash7":
         return "DFlash block=8 (k=7)"
     if mode_name == "dflash2_7":

@@ -170,6 +170,7 @@ SpeculativeStats aggregate_speculative(const TestResult& result) {
         const SpeculativeStats& in = rep.speculative;
         out.enabled                = out.enabled || in.enabled;
         out.backend                = in.backend;
+        out.mtp_draft_policy       = in.mtp_draft_policy;
         out.draft_window           = std::max(out.draft_window, in.draft_window);
         out.rounds += in.rounds;
         out.drafted_tokens += in.drafted_tokens;
@@ -180,6 +181,26 @@ SpeculativeStats aggregate_speculative(const TestResult& result) {
         }
         for (std::size_t i = 0; i < in.accepted_per_position.size(); ++i) {
             out.accepted_per_position[i] += in.accepted_per_position[i];
+        }
+        if (out.drafted_per_position.size() < in.drafted_per_position.size()) {
+            out.drafted_per_position.resize(in.drafted_per_position.size());
+        }
+        for (std::size_t i = 0; i < in.drafted_per_position.size(); ++i) {
+            out.drafted_per_position[i] += in.drafted_per_position[i];
+        }
+        out.window_transitions += in.window_transitions;
+        if (out.window_stats.size() < in.window_stats.size()) {
+            out.window_stats.resize(in.window_stats.size());
+        }
+        for (std::size_t i = 0; i < in.window_stats.size(); ++i) {
+            auto& aggregate    = out.window_stats[i];
+            const auto& window = in.window_stats[i];
+            aggregate.rounds += window.rounds;
+            aggregate.fallback_steps += window.fallback_steps;
+            aggregate.drafted_tokens += window.drafted_tokens;
+            aggregate.accepted_tokens += window.accepted_tokens;
+            aggregate.committed_tokens += window.committed_tokens;
+            aggregate.decode_seconds += window.decode_seconds;
         }
     }
     return out;
@@ -229,6 +250,8 @@ void append_speculative_json(std::ostringstream& out, const SpeculativeStats& st
         << "\",\n"
         << indent << "  \"enabled\": " << (stats.enabled ? "true" : "false") << ",\n"
         << indent << "  \"draft_window\": " << stats.draft_window << ",\n"
+        << indent << "  \"mtp_draft_policy\": \""
+        << product::mtp_draft_policy_name(stats.mtp_draft_policy) << "\",\n"
         << indent << "  \"rounds\": " << stats.rounds << ",\n"
         << indent << "  \"drafted_tokens\": " << stats.drafted_tokens << ",\n"
         << indent << "  \"accepted_tokens\": " << stats.accepted_tokens << ",\n"
@@ -247,10 +270,27 @@ void append_speculative_json(std::ostringstream& out, const SpeculativeStats& st
         out << number(1.0 + static_cast<double>(stats.accepted_tokens) /
                                 static_cast<double>(stats.rounds));
     }
-    out << ",\n" << indent << "  \"accepted_per_position\": [";
+    out << ",\n"
+        << indent << "  \"window_transitions\": " << stats.window_transitions << ",\n"
+        << indent << "  \"accepted_per_position\": [";
     for (std::size_t i = 0; i < stats.accepted_per_position.size(); ++i) {
         if (i != 0) { out << ", "; }
         out << stats.accepted_per_position[i];
+    }
+    out << "],\n" << indent << "  \"drafted_per_position\": [";
+    for (std::size_t i = 0; i < stats.drafted_per_position.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.drafted_per_position[i];
+    }
+    out << "],\n" << indent << "  \"window_stats\": [";
+    for (std::size_t i = 0; i < stats.window_stats.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        const auto& window = stats.window_stats[i];
+        out << "{\"rounds\": " << window.rounds << ", \"fallback_steps\": " << window.fallback_steps
+            << ", \"drafted_tokens\": " << window.drafted_tokens
+            << ", \"accepted_tokens\": " << window.accepted_tokens
+            << ", \"committed_tokens\": " << window.committed_tokens
+            << ", \"decode_seconds\": " << number(window.decode_seconds) << '}';
     }
     out << "]\n" << indent << '}';
 }
@@ -301,7 +341,8 @@ std::string usage_text(std::string_view program) {
         << " (default: " << kDefaultPrefillChunk << ")\n"
         << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4|kvarn>  KV cache storage (default: bf16)\n"
         << "  --spec <mtp|dflash|dflash2> speculative backend (default: none)\n"
-        << "  --draft-tokens <n>         MTP 1..5; DFlash/DFlash2 1..15\n"
+        << "  --draft-tokens <n>         configured MTP maximum or fixed DFlash/DFlash2 K, 1..15\n"
+        << "  --adaptive-mtp             adapt MTP width up to the configured maximum\n"
         << "  --lm-head-draft             use the optimized proposal head; requires a speculative "
            "backend\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
@@ -358,6 +399,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value("--spec"));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value("--draft-tokens"), "draft-tokens");
+        } else if (arg == "--adaptive-mtp") {
+            options.speculative.mtp_draft_policy = MtpDraftPolicy::Adaptive;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--device") {
@@ -599,6 +642,7 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << " kv_cache=" << kv_cache_name(env.kv_cache)
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
+        << " mtp_draft_policy=" << product::mtp_draft_policy_name(env.speculative.mtp_draft_policy)
         << " proposal_head=" << proposal_head_name(env.speculative.proposal_head)
         << " decode_path=" << decode_path_name(env.use_cuda_graph, env.speculative)
         << " graph_prime="
@@ -717,6 +761,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"speculative_backend\": \""
         << product::speculative_backend_name(env.speculative.backend) << "\",\n"
         << "    \"draft_tokens\": " << env.speculative.draft_tokens << ",\n"
+        << "    \"mtp_draft_policy\": \""
+        << product::mtp_draft_policy_name(env.speculative.mtp_draft_policy) << "\",\n"
         << "    \"proposal_head\": \"" << proposal_head_name(env.speculative.proposal_head)
         << "\",\n"
         << "    \"use_cuda_graph\": " << (env.use_cuda_graph ? "true" : "false") << ",\n"
@@ -797,13 +843,13 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
     out << "label,kind,n_prompt,n_gen,architecture,prefill_signature,model_name,artifact_path,max_"
            "context,prefill_chunk,"
            "speculative_"
-           "backend,draft_tokens,"
+           "backend,draft_tokens,mtp_draft_policy,"
            "proposal_head,decode_path,kv_cache,kv_payload_bytes,load_host_to_device_bytes,"
            "weights_capacity_bytes,sequence_capacity_bytes,workspace_capacity_bytes,"
            "workspace_general_capacity_bytes,vision_handoff_capacity_bytes,"
            "cuda_graph_allowance_bytes,"
            "workspace_peak_bytes,workspace_allocator_peak_bytes,"
-           "spec_rounds,spec_fallback_steps,spec_acceptance_rate,"
+           "spec_rounds,spec_fallback_steps,spec_window_transitions,spec_acceptance_rate,"
            "repetitions,prefill_tok_s_mean,prefill_tok_s_stddev,decode_output_tok_s_mean,"
            "decode_output_tok_s_stddev,decode_engine_tok_s_mean,decode_engine_tok_s_stddev,"
            "prepare_seconds_mean,prefill_seconds_mean,decode_seconds_mean,total_seconds_mean\n";
@@ -825,6 +871,7 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
             << csv_field(env.artifact_path) << ',' << env.max_context << ',' << env.prefill_chunk
             << ',' << product::speculative_backend_name(env.speculative.backend) << ','
             << env.speculative.draft_tokens << ','
+            << product::mtp_draft_policy_name(env.speculative.mtp_draft_policy) << ','
             << proposal_head_name(env.speculative.proposal_head) << ','
             << decode_path_name(env.use_cuda_graph, env.speculative) << ','
             << kv_cache_name(env.kv_cache) << ',' << env.memory.kv_payload_bytes << ','
@@ -840,9 +887,10 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
                     : std::string())
             << ',' << env.memory.cuda_graph_allowance_bytes << ',' << result.workspace_peak_bytes
             << ',' << result.workspace_allocator_peak_bytes << ',' << spec.rounds << ','
-            << spec.fallback_steps << ',' << acceptance << ',' << result.reps.size() << ','
-            << mean(prefill_tok_s_series(result)) << ',' << stddev(prefill_tok_s_series(result))
-            << ',' << mean(decode_output_tok_s_series(result)) << ','
+            << spec.fallback_steps << ',' << spec.window_transitions << ',' << acceptance << ','
+            << result.reps.size() << ',' << mean(prefill_tok_s_series(result)) << ','
+            << stddev(prefill_tok_s_series(result)) << ','
+            << mean(decode_output_tok_s_series(result)) << ','
             << stddev(decode_output_tok_s_series(result)) << ','
             << mean(decode_engine_tok_s_series(result)) << ','
             << stddev(decode_engine_tok_s_series(result)) << ','

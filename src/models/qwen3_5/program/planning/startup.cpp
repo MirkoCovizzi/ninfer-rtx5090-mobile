@@ -529,37 +529,49 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
         for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
              ++batch) {
-            const std::int32_t aggregate = batch * verify;
-            WorkspaceLayoutBuilder target;
-            matrix(target, DType::BF16, dimension(config.hidden_size), aggregate);
-            target_body(target, aggregate, aggregate, qwen3_5::TextPhase::Verify,
-                        GdnWorkspacePath::ReplayRecord, batch, verify, verify, text_envelope);
+            // Reserve the reachable adaptive tiers; their Op scratch routes can differ.
+            const std::int32_t first_drafts =
+                plan.mtp_draft_policy == MtpDraftPolicy::Adaptive ? std::min(3, drafts) : drafts;
+            for (std::int32_t active_drafts = first_drafts; active_drafts <= drafts;
+                 ++active_drafts) {
+                if (active_drafts != first_drafts && active_drafts != std::min(7, drafts) &&
+                    active_drafts != drafts) {
+                    continue;
+                }
+                const std::int32_t verify    = active_drafts + 1;
+                const std::int32_t aggregate = batch * verify;
+                WorkspaceLayoutBuilder target;
+                matrix(target, DType::BF16, dimension(config.hidden_size), aggregate);
+                target_body(target, aggregate, aggregate, qwen3_5::TextPhase::Verify,
+                            GdnWorkspacePath::ReplayRecord, batch, verify, verify, text_envelope);
 
-            const auto mtp_decode_core = [&](WorkspaceLayoutBuilder& layout, std::int32_t width) {
-                const std::int32_t tokens = batch * width;
-                auto core                 = layout.scope();
-                mtp_stem(layout, tokens, false);
-                (void)workspace::mtp_attention_projection(layout, config, tokens);
-                scratch(layout, execution::mtp_projection_workspace_bytes(
-                                    parameters.mtp->projection, tokens, tokens));
-                (void)workspace::mtp_attention_results(layout, config, tokens);
-                scratch(layout, gqa_scratch_bytes(text_envelope, batch, width, width));
-                (void)workspace::mtp_post_attention(layout, config, tokens);
-                mtp_post_mixer(layout, tokens, tokens);
-            };
+                const auto mtp_decode_core = [&](WorkspaceLayoutBuilder& layout,
+                                                 std::int32_t width) {
+                    const std::int32_t tokens = batch * width;
+                    auto core                 = layout.scope();
+                    mtp_stem(layout, tokens, false);
+                    (void)workspace::mtp_attention_projection(layout, config, tokens);
+                    scratch(layout, execution::mtp_projection_workspace_bytes(
+                                        parameters.mtp->projection, tokens, tokens));
+                    (void)workspace::mtp_attention_results(layout, config, tokens);
+                    scratch(layout, gqa_scratch_bytes(text_envelope, batch, width, width));
+                    (void)workspace::mtp_post_attention(layout, config, tokens);
+                    mtp_post_mixer(layout, tokens, tokens);
+                };
 
-            WorkspaceLayoutBuilder alignment;
-            mtp_decode_core(alignment, verify);
-            WorkspaceLayoutBuilder ar;
-            mtp_decode_core(ar, 1);
-            WorkspaceLayoutBuilder proposal;
-            proposal_scratch(proposal, batch);
-            const std::size_t batch_accept =
-                ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-                    dimension(parameters.model.resources().public_token_count), drafts, drafts,
-                    batch, batch);
-            out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment), finish(ar),
-                                      finish(proposal), batch_accept});
+                WorkspaceLayoutBuilder alignment;
+                mtp_decode_core(alignment, verify);
+                WorkspaceLayoutBuilder ar;
+                mtp_decode_core(ar, 1);
+                WorkspaceLayoutBuilder proposal;
+                proposal_scratch(proposal, batch);
+                const std::size_t batch_accept =
+                    ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
+                        dimension(parameters.model.resources().public_token_count), active_drafts,
+                        active_drafts, batch, batch);
+                out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment),
+                                          finish(ar), finish(proposal), batch_accept});
+            }
         }
     }
 
@@ -798,19 +810,27 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     switch (options.speculative.backend) {
     case SpeculativeBackend::None:
         if (options.speculative.draft_tokens != 0 ||
-            options.speculative.proposal_head != ProposalHead::Full) {
+            options.speculative.proposal_head != ProposalHead::Full ||
+            options.speculative.mtp_draft_policy != MtpDraftPolicy::Fixed) {
             throw std::invalid_argument(
                 "disabled speculative decoding requires draft_tokens=0 and the full proposal head");
         }
         break;
     case SpeculativeBackend::Mtp:
+        if (options.speculative.mtp_draft_policy != MtpDraftPolicy::Fixed &&
+            options.speculative.mtp_draft_policy != MtpDraftPolicy::Adaptive) {
+            throw std::invalid_argument("invalid MTP draft policy");
+        }
         if (options.speculative.draft_tokens == 0 ||
             options.speculative.draft_tokens > kMaximumMtpDraftTokens) {
-            throw std::invalid_argument("MTP draft window must be in [1,5]");
+            throw std::invalid_argument("MTP draft window must be in [1,15]");
         }
         break;
     case SpeculativeBackend::DFlash:
     case SpeculativeBackend::DFlash2:
+        if (options.speculative.mtp_draft_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("adaptive MTP policy requires the MTP backend");
+        }
         if (!parameters.draft || (options.speculative.backend == SpeculativeBackend::DFlash2) !=
                                      parameters.model.config().draft->dflash2.has_value()) {
             throw std::invalid_argument(
@@ -842,6 +862,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
     impl->speculative_backend = inputs.speculative_backend;
+    impl->mtp_draft_policy    = inputs.mtp_draft_policy;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
@@ -859,18 +880,37 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             impl->graph_allowance_bytes = checked_mul(12ULL * kMiB, impl->max_concurrency,
                                                       "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
-            const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window);
-            const std::size_t per_batch_allowance = graph_topology_allowance(
-                profiles,
+            std::vector<GraphExecutionProfile> reachable;
+            const std::uint32_t first_width = impl->mtp_draft_policy == MtpDraftPolicy::Adaptive
+                                                  ? std::min(3U, impl->draft_window)
+                                                  : impl->draft_window;
+            for (std::uint32_t width = first_width; width <= impl->draft_window; ++width) {
+                if (width != first_width && width != std::min(7U, impl->draft_window) &&
+                    width != impl->draft_window) {
+                    continue;
+                }
+                for (GraphExecutionProfile profile : mtp_graph_profiles(impl->capacity, width)) {
+                    profile.mtp_draft_window = width;
+                    reachable.push_back(profile);
+                }
+            }
+            const std::size_t executable_allowance = graph_topology_allowance(
+                reachable,
                 [&](GraphExecutionProfile profile) {
                     const std::uint64_t final_visible = std::min<std::uint64_t>(
                         impl->capacity,
-                        static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
+                        static_cast<std::uint64_t>(profile.max) + 2ULL * profile.mtp_draft_window);
                     return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
                 },
                 "MTP graph allowance");
-            impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
-                                                      "MTP exact-b graph allowance");
+            // Source graph definitions occupy Host memory, not a second Device arena. Adaptive
+            // MTP retains one frontier definition per (B,K); the Device allowance bounds the
+            // resident executables and their driver state, as for the fixed graph families.
+            impl->graph_allowance_bytes =
+                impl->mtp_draft_policy == MtpDraftPolicy::Adaptive
+                    ? executable_allowance
+                    : checked_mul(executable_allowance, impl->max_concurrency,
+                                  "MTP exact-b graph allowance");
         } else {
             const auto class_allowance = [&](std::uint32_t batch_size) {
                 const auto profiles = dflash_graph_profiles(
@@ -912,6 +952,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
+        .mtp_draft_policy    = options.speculative.mtp_draft_policy,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
         .features            = models::load_options(options),

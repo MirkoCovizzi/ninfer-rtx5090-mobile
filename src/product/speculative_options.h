@@ -29,27 +29,44 @@ namespace ninfer::product {
     return "unknown";
 }
 
+[[nodiscard]] inline const char* mtp_draft_policy_name(MtpDraftPolicy policy) noexcept {
+    switch (policy) {
+    case MtpDraftPolicy::Fixed:
+        return "fixed";
+    case MtpDraftPolicy::Adaptive:
+        return "adaptive";
+    }
+    return "unknown";
+}
+
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
     switch (options.backend) {
     case SpeculativeBackend::None:
-        if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {
-            throw std::invalid_argument(
-                "--draft-tokens and --lm-head-draft require --spec mtp|dflash|dflash2");
+        if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full ||
+            options.mtp_draft_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("--draft-tokens, --adaptive-mtp, and --lm-head-draft "
+                                        "require --spec mtp|dflash|dflash2");
         }
         return;
     case SpeculativeBackend::Mtp:
-        if (options.draft_tokens == 0 || options.draft_tokens > 5) {
-            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,5]");
+        if (options.draft_tokens == 0 || options.draft_tokens > 15) {
+            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,15]");
         }
         return;
     case SpeculativeBackend::DFlash:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash requires --draft-tokens in [1,15]");
         }
+        if (options.mtp_draft_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
+        }
         return;
     case SpeculativeBackend::DFlash2:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash2 requires --draft-tokens in [1,15]");
+        }
+        if (options.mtp_draft_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
         }
         return;
     }
