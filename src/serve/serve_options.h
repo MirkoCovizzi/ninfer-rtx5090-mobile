@@ -47,9 +47,10 @@ struct ServeOptions {
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
-    bool enable_vision      = false;
-    bool use_cuda_graph     = true;
-    bool allow_prefix_reuse = true;
+    bool enable_vision                  = false;
+    bool enable_nvfp4_scale_compression = false;
+    bool use_cuda_graph                 = true;
+    bool allow_prefix_reuse             = true;
     std::optional<bool> enable_thinking;
     std::optional<bool> preserve_thinking;
     std::optional<std::uint32_t> default_thinking_budget;

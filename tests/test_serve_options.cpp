@@ -165,6 +165,7 @@ int main() {
                                            "model.ninfer",
                                            "--no-prefix-reuse",
                                            "--vision",
+                                           "--nvfp4-scale-compression",
                                            "--max-concurrency",
                                            "4",
                                            "--max-pending-requests",
@@ -190,6 +191,8 @@ int main() {
                           configured.context_cache.host_kv_capacity_bytes == 0,
                       "root-only server mode retained default Host capacities");
     failures += check(configured.enable_vision, "--vision did not enable Vision");
+    failures += check(configured.enable_nvfp4_scale_compression,
+                      "--nvfp4-scale-compression did not enable weight compression");
     failures += check(configured.preserve_thinking == true,
                       "--preserve-thinking did not reach serving options");
     failures +=

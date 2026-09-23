@@ -233,25 +233,26 @@ private:
 GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
     : options_(std::move(options)) {
     ninfer::EngineOptions engine_options;
-    engine_options.artifact_path            = options_.artifact_path;
-    engine_options.chat_template_path       = options_.chat_template_path;
-    engine_options.device                   = options_.device;
-    engine_options.max_context              = options_.max_context;
-    engine_options.kv_capacity              = options_.kv_capacity;
-    engine_options.max_concurrency          = options_.max_concurrency;
-    engine_options.max_pending_requests     = options_.max_pending_requests;
-    engine_options.pending_timeout_ms       = options_.pending_timeout_ms;
-    engine_options.prefill_chunk            = options_.prefill_chunk;
-    engine_options.kv_cache                 = options_.kv_cache;
-    engine_options.enable_vision            = options_.enable_vision;
-    engine_options.use_cuda_graph           = options_.use_cuda_graph;
-    engine_options.speculative              = options_.speculative;
-    engine_options.context_cache            = options_.context_cache;
-    engine_options.context_cost.preset_path = options_.context_cost_presets;
-    engine_options.media_cache_bytes        = options_.media_cache_bytes;
-    engine_options.media_live_bytes         = options_.media_live_bytes;
-    engine_options.media_preprocess_threads = options_.media_preprocess_threads;
-    engine_options.startup_observer         = std::move(startup_observer);
+    engine_options.artifact_path                  = options_.artifact_path;
+    engine_options.chat_template_path             = options_.chat_template_path;
+    engine_options.device                         = options_.device;
+    engine_options.max_context                    = options_.max_context;
+    engine_options.kv_capacity                    = options_.kv_capacity;
+    engine_options.max_concurrency                = options_.max_concurrency;
+    engine_options.max_pending_requests           = options_.max_pending_requests;
+    engine_options.pending_timeout_ms             = options_.pending_timeout_ms;
+    engine_options.prefill_chunk                  = options_.prefill_chunk;
+    engine_options.kv_cache                       = options_.kv_cache;
+    engine_options.enable_vision                  = options_.enable_vision;
+    engine_options.enable_nvfp4_scale_compression = options_.enable_nvfp4_scale_compression;
+    engine_options.use_cuda_graph                 = options_.use_cuda_graph;
+    engine_options.speculative                    = options_.speculative;
+    engine_options.context_cache                  = options_.context_cache;
+    engine_options.context_cost.preset_path       = options_.context_cost_presets;
+    engine_options.media_cache_bytes              = options_.media_cache_bytes;
+    engine_options.media_live_bytes               = options_.media_live_bytes;
+    engine_options.media_preprocess_threads       = options_.media_preprocess_threads;
+    engine_options.startup_observer               = std::move(startup_observer);
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
     request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);

@@ -85,6 +85,32 @@ void Binder::require_device(ObjectHandle object, std::uint64_t alignment) {
     demand.alignment = std::max({demand.alignment, alignment, geometry.alignment});
 }
 
+void Binder::require_device_prefix(ObjectHandle object, std::uint64_t bytes) {
+    const auto& geometry = reader_.geometry(object);
+    if (geometry.format != QType::NVFP4 || bytes != geometry.code_bytes ||
+        !demands_.at(object.index).device) {
+        throw ArtifactError("compressed NVFP4 placement requires a bound code-plane prefix");
+    }
+    demands_[object.index].prefix_bytes = bytes;
+}
+
+void Binder::reserve_device_bytes(std::uint64_t bytes) {
+    reserved_device_bytes_ = checked_add(reserved_device_bytes_, bytes, "reserved device bytes");
+}
+
+std::vector<std::byte> Binder::read_object_range(ObjectHandle object, std::uint64_t offset,
+                                                 std::uint64_t bytes) {
+    const auto& descriptor = reader_.directory().tensor(object);
+    if (offset > descriptor.bytes || bytes > descriptor.bytes - offset ||
+        bytes > std::numeric_limits<std::size_t>::max()) {
+        throw ArtifactError("selected Host tensor range is outside its payload");
+    }
+    std::vector<std::byte> result(static_cast<std::size_t>(bytes));
+    reader_.read_into(checked_add(descriptor.offset, offset, "Host tensor offset"), result);
+    read_bytes_ = checked_add(read_bytes_, bytes, "Host read bytes");
+    return result;
+}
+
 std::span<const std::byte> Binder::host_object(ObjectHandle object) {
     reader_.validate_object(object);
     auto& demand = demands_.at(object.index);
@@ -167,12 +193,20 @@ MaterializationPlan Binder::finish() && {
             const auto& geometry = reader_.geometry(handle);
             const auto offset =
                 align_up(plan.device_capacity_bytes, demand.alignment, "device offset");
-            plan.device_objects.push_back({handle, offset, geometry.bytes, demand.alignment});
-            plan.device_capacity_bytes = checked_add(offset, geometry.bytes, "device capacity");
+            const auto bytes = demand.prefix_bytes.value_or(geometry.bytes);
+            plan.device_objects.push_back({handle, offset, bytes, demand.alignment});
+            plan.device_capacity_bytes = checked_add(offset, bytes, "device capacity");
         }
         if (demand.host) {
             plan.host_objects.push_back({ObjectHandle{i}, std::move(demand.host_data)});
         }
+    }
+    if (reserved_device_bytes_) {
+        plan.auxiliary_device_offset =
+            align_up(plan.device_capacity_bytes, 256, "auxiliary device offset");
+        plan.auxiliary_device_bytes = reserved_device_bytes_;
+        plan.device_capacity_bytes =
+            checked_add(plan.auxiliary_device_offset, reserved_device_bytes_, "device capacity");
     }
     return plan;
 }

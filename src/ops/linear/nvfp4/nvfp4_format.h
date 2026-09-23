@@ -14,6 +14,7 @@ struct Nvfp4WeightGeometry {
     std::uint64_t required_payload_bytes;
 };
 
-Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation);
+Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation,
+                                          bool allow_compressed_scales = false);
 
 } // namespace ninfer::ops::detail

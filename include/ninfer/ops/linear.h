@@ -48,6 +48,10 @@ enum class LinearPolicy : std::uint8_t {
                                                           std::int32_t min_tokens,
                                                           std::int32_t max_tokens);
 
+[[nodiscard]] std::size_t linear_workspace_capacity_bytes(const Weight& weight, LinearPolicy policy,
+                                                          std::int32_t min_tokens,
+                                                          std::int32_t max_tokens);
+
 /**
  * @brief Applies a bias-free matrix projection independently to every input column.
  *

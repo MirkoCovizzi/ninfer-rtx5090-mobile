@@ -1,8 +1,10 @@
 #include "core/weight.h"
+#include "core/layout.h"
 #include "ninfer/ops/linear_swiglu.h"
 
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_compressed_scales.h"
 #include "ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
@@ -115,7 +117,7 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
     }
 
     if (nvfp4_weight) {
-        (void)detail::validate_nvfp4_weight(gate_up_weight, "nvfp4 linear_swiglu");
+        (void)detail::validate_nvfp4_weight(gate_up_weight, "nvfp4 linear_swiglu", true);
         detail::nvfp4_linear_swiglu_dispatch(x, gate_up_weight, out, policy, ws, stream);
         return;
     }
@@ -130,6 +132,19 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
     } else {
         detail::q4_linear_swiglu_dispatch(x, gate_up_weight, out, ws, stream);
     }
+}
+
+std::size_t linear_swiglu_workspace_capacity_bytes(const Weight& w, LinearPolicy policy,
+                                                   std::int32_t min_tokens,
+                                                   std::int32_t max_tokens) {
+    const auto base =
+        linear_swiglu_workspace_capacity_bytes(w.qtype, w.n, w.k, policy, min_tokens, max_tokens);
+    if (!w.compressed_scales) { return base; }
+    (void)detail::validate_nvfp4_weight(w, "linear_swiglu workspace", true);
+    WorkspaceLayoutBuilder layout;
+    (void)layout.alloc_bytes(nvfp4_scale_plane_bytes(w.n, w.k), 256);
+    (void)layout.alloc_bytes(base, 256);
+    return layout.peak_bytes(1);
 }
 
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, WorkspaceArena& ws,

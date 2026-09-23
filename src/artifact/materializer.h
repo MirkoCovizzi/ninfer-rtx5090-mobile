@@ -28,11 +28,13 @@ struct HostPlacement {
 };
 
 struct MaterializationPlan {
-    const Reader* source                = nullptr;
-    std::size_t object_count            = 0;
-    std::uint64_t device_capacity_bytes = 0;
-    std::uint64_t prior_read_bytes      = 0;
-    std::uint64_t owned_value_bytes     = 0;
+    const Reader* source                  = nullptr;
+    std::size_t object_count              = 0;
+    std::uint64_t device_capacity_bytes   = 0;
+    std::uint64_t auxiliary_device_offset = 0;
+    std::uint64_t auxiliary_device_bytes  = 0;
+    std::uint64_t prior_read_bytes        = 0;
+    std::uint64_t owned_value_bytes       = 0;
     std::vector<DevicePlacement> device_objects;
     std::vector<HostPlacement> host_objects;
 };
@@ -63,6 +65,9 @@ public:
     [[nodiscard]] const WeightParent& host_parent(ObjectHandle handle) const;
     [[nodiscard]] std::span<const std::byte> host_bytes(ObjectHandle handle) const;
     [[nodiscard]] bool has_device(ObjectHandle handle) const noexcept;
+    void attach_compressed_scales(ObjectHandle handle, std::span<const std::uint8_t> payload,
+                                  std::span<const std::uint32_t> offsets,
+                                  std::int32_t tiles_per_row);
 
     [[nodiscard]] const MaterializationStats& stats() const noexcept { return stats_; }
 
@@ -77,6 +82,8 @@ private:
     };
 
     std::unique_ptr<DeviceArena> arena_;
+    std::uint64_t auxiliary_device_offset_ = 0;
+    std::uint64_t auxiliary_device_bytes_  = 0;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };

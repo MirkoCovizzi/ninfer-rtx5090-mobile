@@ -217,7 +217,7 @@ WeightRowPlanes weight_row_planes(const WeightRegion& region) {
         out.high = parent.data + g.high_offset + out.row_begin * out.high_row_bytes;
     }
     out.swizzled_scales = g.layout == QuantLayout::BlockScaleK16M128x4;
-    if (g.scale_bytes) {
+    if (g.scale_bytes && !parent.compressed_scales) {
         out.scales = parent.data + g.scale_offset +
                      (out.swizzled_scales ? 0 : out.row_begin * out.scale_row_bytes);
     }
@@ -247,7 +247,7 @@ Weight native_weight(const WeightView& view, float input_divisor) {
     }
     Weight out;
     out.payload          = region.parent->data;
-    out.payload_bytes    = g.bytes;
+    out.payload_bytes    = region.parent->resident_bytes ? region.parent->resident_bytes : g.bytes;
     out.high_plane_bytes = g.high_bytes;
     out.qtype            = g.format;
     out.layout           = g.layout;
@@ -267,14 +267,17 @@ Weight native_weight(const WeightView& view, float input_divisor) {
         throw std::invalid_argument(
             "this native Weight input requires a complete FP8/NVFP4 parent");
     }
-    out.padded_shape[1]      = dimension(g.padded_columns);
-    out.qdata                = planes.codes;
-    out.qhigh                = planes.high;
-    out.scales               = planes.scales;
-    out.group_size           = static_cast<std::uint32_t>(g.group_size);
-    out.group                = g.group_size ? dimension(g.group_size) : 0;
-    out.weight_scale_divisor = region.parent->weight_scale_divisor;
-    out.input_scale_divisor  = input_divisor;
+    out.padded_shape[1]                = dimension(g.padded_columns);
+    out.qdata                          = planes.codes;
+    out.qhigh                          = planes.high;
+    out.scales                         = planes.scales;
+    out.group_size                     = static_cast<std::uint32_t>(g.group_size);
+    out.group                          = g.group_size ? dimension(g.group_size) : 0;
+    out.weight_scale_divisor           = region.parent->weight_scale_divisor;
+    out.input_scale_divisor            = input_divisor;
+    out.compressed_scales              = region.parent->compressed_scales;
+    out.compressed_scale_offsets       = region.parent->compressed_scale_offsets;
+    out.compressed_scale_tiles_per_row = region.parent->compressed_scale_tiles_per_row;
     if (g.layout == QuantLayout::RowSplit) {
         out.scale_dtype = DType::FP16;
         out.scale_ne[0] = dimension(g.padded_columns / g.group_size);

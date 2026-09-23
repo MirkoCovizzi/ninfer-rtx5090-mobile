@@ -1,5 +1,7 @@
 #include "core/weight.h"
 #include "ops/linear/linear_test_common.h"
+#include "ninfer/ops/nvfp4_scale_compression.h"
+#include <optional>
 
 #include "core/arena.h"
 #include "core/decode_graph.h"
@@ -316,7 +318,28 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
     device_activation.copy_from_host(activation_bits.data(), device_activation.bytes);
     DeviceBuffer device_weight(host_weight.payload.size());
     device_weight.copy_from_host(host_weight.payload.data(), device_weight.bytes);
-    const Weight weight = host_weight.device_weight(device_weight.p);
+    Weight weight = host_weight.device_weight(device_weight.p);
+    std::optional<DeviceBuffer> codes, payload, offsets;
+    if (shape.compressed_scales) {
+        const auto code_bytes   = static_cast<std::size_t>(shape.n) * shape.k / 2;
+        const auto scale_offset = (code_bytes + 255U) & ~std::size_t{255U};
+        const auto scales       = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(host_weight.payload.data() + scale_offset),
+            code_bytes / 8);
+        const auto compressed = ops::compress_nvfp4_scale_plane(scales, shape.n, shape.k);
+        codes.emplace(code_bytes);
+        payload.emplace(compressed.payload.size());
+        offsets.emplace(compressed.offsets.size() * sizeof(std::uint32_t));
+        codes->copy_from_host(host_weight.payload.data(), code_bytes);
+        payload->copy_from_host(compressed.payload.data(), compressed.payload.size());
+        offsets->copy_from_host(compressed.offsets.data(), offsets->bytes);
+        weight.payload = weight.qdata         = codes->p;
+        weight.payload_bytes                  = code_bytes;
+        weight.scales                         = nullptr;
+        weight.compressed_scales              = payload->p;
+        weight.compressed_scale_offsets       = static_cast<const std::uint32_t*>(offsets->p);
+        weight.compressed_scale_tiles_per_row = compressed.tiles_per_row;
+    }
 
     std::vector<double> full_reference;
     if (shape.comparison == Comparison::Full) {
@@ -337,7 +360,7 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
         Tensor input(device_activation.p, DType::BF16, {shape.k, invocation.t});
         Tensor destination(output.data(), DType::BF16, {shape.n, invocation.t});
         const std::size_t capacity = ops::linear_workspace_capacity_bytes(
-            weight.qtype, shape.n, shape.k, invocation.policy, invocation.t, invocation.t);
+            weight, invocation.policy, invocation.t, invocation.t);
         DeviceArena workspace(std::max<std::size_t>(capacity, 256));
         std::unique_ptr<DeviceContext> graph_context;
         DecodeGraphDefinition graph_definition;

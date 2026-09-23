@@ -26,24 +26,24 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
         (void)layout.alloc(DType::BF16, {gu.n, last});
         {
             auto scope = layout.scope();
-            (void)layout.alloc_bytes(ops::linear_workspace_capacity_bytes(
-                gu.qtype, gu.n, gu.k, p.gate_up.policy, first, last));
+            (void)layout.alloc_bytes(
+                ops::linear_workspace_capacity_bytes(gu, p.gate_up.policy, first, last));
         }
         (void)layout.alloc(DType::BF16, {gu.n / 2, last});
         (void)layout.alloc(DType::BF16, {down.n, last});
-        (void)layout.alloc_bytes(ops::linear_workspace_capacity_bytes(down.qtype, down.n, down.k,
-                                                                      p.down.policy, first, last));
+        (void)layout.alloc_bytes(
+            ops::linear_workspace_capacity_bytes(down, p.down.policy, first, last));
     } else {
         (void)layout.alloc(DType::BF16, {gu.n / 2, last});
         {
             auto scope = layout.scope();
-            (void)layout.alloc_bytes(ops::linear_swiglu_workspace_capacity_bytes(
-                gu.qtype, gu.n, gu.k, p.gate_up.policy, first, last));
+            (void)layout.alloc_bytes(
+                ops::linear_swiglu_workspace_capacity_bytes(gu, p.gate_up.policy, first, last));
         }
         {
             auto scope = layout.scope();
-            (void)layout.alloc_bytes(ops::linear_add_workspace_capacity_bytes(
-                down.qtype, down.n, down.k, p.down.policy, first, last));
+            (void)layout.alloc_bytes(
+                ops::linear_add_workspace_capacity_bytes(down, p.down.policy, first, last));
         }
     }
     return layout.peak_bytes(1);

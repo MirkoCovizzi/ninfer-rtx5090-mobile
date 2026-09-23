@@ -55,8 +55,12 @@ struct WeightGeometry {
 
 struct WeightParent {
     WeightGeometry geometry;
-    const std::byte* data      = nullptr;
-    float weight_scale_divisor = 0.0F;
+    const std::byte* data                         = nullptr;
+    float weight_scale_divisor                    = 0.0F;
+    std::uint64_t resident_bytes                  = 0;
+    const void* compressed_scales                 = nullptr;
+    const std::uint32_t* compressed_scale_offsets = nullptr;
+    std::int32_t compressed_scale_tiles_per_row   = 0;
 };
 
 struct WeightRegion {

@@ -35,18 +35,21 @@ struct Weight {
     std::int32_t padded_shape[4]   = {1, 1, 1, 1};
     std::uint32_t ndim             = 0;
 
-    const void* qdata          = nullptr;
-    const void* qhigh          = nullptr;
-    const void* scales         = nullptr;
-    std::int32_t n             = 0;
-    std::int32_t k             = 0;
-    std::int32_t group         = 0;
-    QuantLayout layout         = QuantLayout::RowSplit;
-    DType scale_dtype          = DType::FP32;
-    std::int32_t scale_ne[4]   = {1, 1, 1, 1};
-    std::int64_t scale_nb[4]   = {0, 0, 0, 0};
-    float weight_scale_divisor = 0.0F;
-    float input_scale_divisor  = 0.0F;
+    const void* qdata                             = nullptr;
+    const void* qhigh                             = nullptr;
+    const void* scales                            = nullptr;
+    std::int32_t n                                = 0;
+    std::int32_t k                                = 0;
+    std::int32_t group                            = 0;
+    QuantLayout layout                            = QuantLayout::RowSplit;
+    DType scale_dtype                             = DType::FP32;
+    std::int32_t scale_ne[4]                      = {1, 1, 1, 1};
+    std::int64_t scale_nb[4]                      = {0, 0, 0, 0};
+    float weight_scale_divisor                    = 0.0F;
+    float input_scale_divisor                     = 0.0F;
+    const void* compressed_scales                 = nullptr;
+    const std::uint32_t* compressed_scale_offsets = nullptr;
+    std::int32_t compressed_scale_tiles_per_row   = 0;
 };
 
 } // namespace ninfer

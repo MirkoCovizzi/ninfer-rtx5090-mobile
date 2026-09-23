@@ -45,6 +45,11 @@ int run_nvfp4_a4() {
                           {5120, 6144, 723U, Comparison::Sampled, true, invocations});
     failures += run_shape("NVFP4_A4", ActivationCompute::A4, make_nvfp4_weight,
                           {5120, 17408, 725U, Comparison::Sampled, true, invocations});
+    const std::vector<Invocation> compressed_cases{
+        {1, CallForm::Policy, ops::LinearPolicy::AllowA4},
+        {129, CallForm::Policy, ops::LinearPolicy::AllowA4, true}};
+    failures += run_shape("NVFP4_A4 compressed", ActivationCompute::A4, make_nvfp4_weight,
+                          {34816, 5120, 722U, Comparison::Sampled, true, compressed_cases, true});
     return failures;
 }
 

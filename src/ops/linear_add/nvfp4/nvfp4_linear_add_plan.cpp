@@ -2,6 +2,7 @@
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 
 #include "ops/linear/nvfp4/nvfp4_layout.h"
+#include "ops/linear/nvfp4/nvfp4_compressed_scales.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -52,13 +53,19 @@ std::size_t nvfp4_linear_add_workspace_capacity_bytes(std::int32_t output_rows,
 void nvfp4_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& residual,
                                LinearPolicy policy, WorkspaceArena& workspace,
                                cudaStream_t stream) {
+    auto scope       = workspace.scope();
+    Weight execution = weight;
+    if (weight.compressed_scales) {
+        const auto scales = workspace.alloc_bytes(nvfp4_scale_plane_bytes(weight.n, weight.k), 256);
+        execution.scales  = scales.data;
+        expand_nvfp4_scales(weight, static_cast<std::uint8_t*>(scales.data), stream);
+    }
     if (resolve_route(weight.n, weight.k, policy, x.ne[1]) == Nvfp4LinearAddRoute::A16) {
-        nvfp4_linear_add_a16_launch(x, weight, residual, stream);
+        nvfp4_linear_add_a16_launch(x, execution, residual, stream);
         return;
     }
-    auto scope                     = workspace.scope();
     const Nvfp4A4Workspace scratch = allocate_nvfp4_a4_workspace(workspace, x.ne[1], weight.k);
-    nvfp4_linear_add_a4_launch(x, weight, residual, scratch, stream);
+    nvfp4_linear_add_a4_launch(x, execution, residual, scratch, stream);
 }
 
 } // namespace ninfer::ops::detail

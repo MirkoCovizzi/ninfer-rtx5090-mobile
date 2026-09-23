@@ -233,6 +233,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--adaptive-mtp` | adapt MTP physical width up to `--draft-tokens`; requires MTP | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
+| `--nvfp4-scale-compression` | losslessly compress resident NVFP4 dense-FFN scale planes | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
 | `--no-thinking` | disable thinking | template default |
@@ -300,6 +301,13 @@ and CUDA Graph allowance, while leaving the default 1 GiB automatic headroom
 unallocated. It does not probe allocations or resize the pool at request time. The single-request
 CLI normally leaves the option omitted so it follows
 `--max-context`; the distinction matters primarily to a concurrent Engine or server.
+
+`--nvfp4-scale-compression` is an opt-in startup memory tradeoff for artifacts with NVFP4 dense
+FFN weights. It stores exact palette-coded scale bytes for selected Text and MTP FFN parents,
+then expands each scale plane into caller-owned workspace for projection calls. Mixed FP8 layers
+remain in their stored representation; NVFP4 parents whose encoding would increase resident bytes
+also keep their original scale plane. This saves resident weight memory but adds load-time CPU
+work and per-call GPU work; leave it off for maximum inference throughput.
 
 At Engine startup NInfer reserves model weights, persistent sequence state, one phase-reused
 Program workspace, and a separate CUDA Graph driver allowance. With Vision enabled, that one
