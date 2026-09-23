@@ -92,10 +92,11 @@ int main() {
                   }),
                   "CLI accepted an unsupported DFlash2 draft count");
     }
-    const ninfer::cli::Options nvfp4 =
-        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "nvfp4"});
-    failures += check(nvfp4.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16,
-                      "--kv-dtype nvfp4 did not select group-16 NVFP4 KV");
+    const ninfer::cli::Options nvfp4 = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                              "--kv-dtype", "nvfp4", "--nvfp4-scale-compression"});
+    failures += check(nvfp4.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16 &&
+                          nvfp4.enable_nvfp4_scale_compression,
+                      "NVFP4 weight compression and KV storage options were not independent");
     const ninfer::cli::Options k8v4 =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
@@ -104,6 +105,8 @@ int main() {
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
               "CLI help omits a production KV storage mode");
+    failures += check(help.find("--nvfp4-scale-compression") != std::string::npos,
+                      "CLI help omits NVFP4 weight compression");
     const ninfer::cli::Options logging =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--log-level", "debug"});
     failures += check(logging.log_level == ninfer::product::LogLevel::Debug,

@@ -7,6 +7,7 @@
 #include "ninfer/ops/linear_swiglu.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
+#include "ninfer/ops/nvfp4_scale_compression.h"
 
 #include <cuda_runtime.h>
 
@@ -290,7 +291,30 @@ int run_profile(std::string_view label, const Profile& profile,
 
     test::GuardedDeviceBuffer device_weight(host_weight.payload.size());
     device_weight.copy_from_host(host_weight.payload.data(), host_weight.payload.size());
-    const Weight weight = host_weight.device_weight(device_weight.data());
+    Weight weight = host_weight.device_weight(device_weight.data());
+    std::optional<DeviceBuffer> codes, payload, offsets;
+    if (profile.compressed_scales) {
+        const std::size_t code_bytes =
+            checked_elements(profile.gate_up_rows, profile.input_rows, "codes") / 2;
+        const std::size_t scale_offset = (code_bytes + 255U) & ~std::size_t{255U};
+        const auto scales              = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(host_weight.payload.data() + scale_offset),
+            code_bytes / 8);
+        const auto compressed =
+            ops::compress_nvfp4_scale_plane(scales, profile.gate_up_rows, profile.input_rows);
+        codes.emplace(code_bytes);
+        payload.emplace(compressed.payload.size());
+        offsets.emplace(compressed.offsets.size() * sizeof(std::uint32_t));
+        codes->copy_from_host(host_weight.payload.data(), code_bytes);
+        payload->copy_from_host(compressed.payload.data(), compressed.payload.size());
+        offsets->copy_from_host(compressed.offsets.data(), offsets->bytes);
+        weight.payload = weight.qdata         = codes->p;
+        weight.payload_bytes                  = code_bytes;
+        weight.scales                         = nullptr;
+        weight.compressed_scales              = payload->p;
+        weight.compressed_scale_offsets       = static_cast<const std::uint32_t*>(offsets->p);
+        weight.compressed_scale_tiles_per_row = compressed.tiles_per_row;
+    }
 
     test::GuardedDeviceBuffer device_activation(host_activation.size() * sizeof(std::uint16_t));
     device_activation.copy_from_host(host_activation.data(),
@@ -301,8 +325,8 @@ int run_profile(std::string_view label, const Profile& profile,
             ? ops::LinearPolicy::AllowA4
             : (profile.activation_compute == ActivationCompute::A8 ? ops::LinearPolicy::AllowA8
                                                                    : ops::LinearPolicy::A16Only);
-    const std::size_t workspace_bytes = ops::linear_swiglu_workspace_capacity_bytes(
-        profile.qtype, profile.gate_up_rows, profile.input_rows, policy, 1, maximum_tokens);
+    const std::size_t workspace_bytes =
+        ops::linear_swiglu_workspace_capacity_bytes(weight, policy, 1, maximum_tokens);
     WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 256));
 
     int failures        = 0;
@@ -340,9 +364,8 @@ int run_profile(std::string_view label, const Profile& profile,
                 else
                     launch();
                 test::cuda_check(cudaStreamSynchronize(stream), "synchronize LinearSwiGLU");
-                const auto exact = ops::linear_swiglu_workspace_capacity_bytes(
-                    profile.qtype, profile.gate_up_rows, profile.input_rows, policy, tokens,
-                    tokens);
+                const auto exact =
+                    ops::linear_swiglu_workspace_capacity_bytes(weight, policy, tokens, tokens);
                 if (workspace.used() != 0 || workspace.peak_used() != exact) {
                     std::cerr << label_case << ": exact workspace query/execution mismatch\n";
                     ++failures;

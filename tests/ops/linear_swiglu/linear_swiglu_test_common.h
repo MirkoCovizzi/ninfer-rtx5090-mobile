@@ -22,6 +22,7 @@ struct Profile {
     std::int32_t output_rows;
     std::uint32_t seed;
     ActivationCompute activation_compute;
+    bool compressed_scales = false;
 };
 
 int run_profile(std::string_view label, const Profile& profile,

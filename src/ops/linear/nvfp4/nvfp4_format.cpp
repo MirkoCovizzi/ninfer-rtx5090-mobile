@@ -36,7 +36,8 @@ std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment, const char*
 
 } // namespace
 
-Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation) {
+Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation,
+                                          bool allow_compressed_scales) {
     if (weight.n <= 0 || weight.k <= 0 || (weight.n % 128) != 0 || (weight.k % 64) != 0) {
         throw std::invalid_argument(std::string(operation) + ": NVFP4 requires N%128=0 and K%64=0");
     }
@@ -51,21 +52,35 @@ Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* oper
         checked_add(checked_add(geometry.scale_plane_offset, geometry.scale_plane_bytes, operation),
                     sizeof(float), operation);
 
-    if (weight.qtype != QType::NVFP4 || weight.layout != QuantLayout::BlockScaleK16M128x4 ||
+    const bool compressed =
+        weight.compressed_scales != nullptr && weight.compressed_scale_offsets != nullptr &&
+        weight.compressed_scale_tiles_per_row == weight.k / 128 && weight.k % 128 == 0;
+    const bool no_compression = weight.compressed_scales == nullptr &&
+                                weight.compressed_scale_offsets == nullptr &&
+                                weight.compressed_scale_tiles_per_row == 0;
+    if ((!compressed && !no_compression) ||
+        (compressed && !allow_compressed_scales && weight.scales == nullptr) ||
+        weight.qtype != QType::NVFP4 || weight.layout != QuantLayout::BlockScaleK16M128x4 ||
         weight.scale_dtype != DType::FP8_E4M3FN || weight.group_size != 16 || weight.group != 16 ||
         weight.ndim != 2 || weight.shape[0] != weight.n || weight.shape[1] != weight.k ||
         weight.padded_shape[0] != weight.n || weight.padded_shape[1] != weight.k ||
-        weight.payload == nullptr || weight.qdata == nullptr || weight.scales == nullptr ||
-        weight.qhigh != nullptr || weight.high_plane_bytes != 0 ||
-        weight.payload_bytes < geometry.required_payload_bytes ||
+        weight.payload == nullptr || weight.qdata == nullptr ||
+        (!compressed && weight.scales == nullptr) || weight.qhigh != nullptr ||
+        weight.high_plane_bytes != 0 ||
+        weight.payload_bytes <
+            (compressed ? geometry.code_plane_bytes : geometry.required_payload_bytes) ||
         !std::isfinite(weight.weight_scale_divisor) || weight.weight_scale_divisor <= 0.0F ||
         !std::isfinite(weight.input_scale_divisor) || weight.input_scale_divisor <= 0.0F ||
-        !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 16)) {
+        !aligned_to(weight.qdata, 16) ||
+        (compressed && (!aligned_to(weight.compressed_scales, 16) ||
+                        !aligned_to(weight.compressed_scale_offsets, 4))) ||
+        (weight.scales != nullptr && !aligned_to(weight.scales, 16))) {
         throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 weight");
     }
 
     const auto* payload = static_cast<const std::byte*>(weight.payload);
-    if (weight.qdata != payload || weight.scales != payload + geometry.scale_plane_offset) {
+    if (weight.qdata != payload ||
+        (!compressed && weight.scales != payload + geometry.scale_plane_offset)) {
         throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 plane geometry");
     }
     return geometry;

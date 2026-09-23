@@ -807,6 +807,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
+| `--nvfp4-scale-compression` | losslessly compress resident NVFP4 dense-FFN scale planes | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |
@@ -833,6 +834,12 @@ the hardware and a signature derived from the actual Text/Vision configuration, 
 A new representation without a matching measurement uses generic prefill coefficients. A malformed
 file aborts startup; the operational context-cost record and JSONL `server_start` identify the
 selected source.
+
+`--nvfp4-scale-compression` fixes weight storage at server startup. NVFP4 dense Text and MTP FFN
+weights retain their original code bytes and exact palette-compressed scale bytes; each projection
+expands its scales into Program workspace. This trades startup and per-call work for resident model
+memory and potentially more KV capacity under `--kv-capacity auto`. Artifacts without NVFP4 dense
+FFN parents reject the option. Parents that do not compress smaller retain their original scales.
 
 Engine selects sampling defaults from the loaded architecture and the request's resolved thinking mode.
 Qwen3.6-27B and Qwen3.8-27B use `1.0/0.95/20/0/0` for
@@ -868,7 +875,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v22 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v23 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;

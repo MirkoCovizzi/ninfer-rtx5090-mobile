@@ -2,6 +2,7 @@
 #include "artifact/fixture.h"
 #include "artifact/formats.h"
 #include "models/qwen3_5/load.h"
+#include "ops/op_tester.h"
 
 #include <algorithm>
 #include <array>
@@ -198,6 +199,8 @@ void logical_data_and_instances() {
             "incomplete selected Vision was accepted");
     rejects([&] { (void)qwen::plan_load(reader, {.speculative = SpeculativeBackend::Mtp}); },
             "absent MTP was accepted");
+    rejects([&] { (void)qwen::plan_load(reader, {.nvfp4_scale_compression = true}); },
+            "compression without NVFP4 dense weights was accepted");
 
     fixture.file.root["metadata"]["name"] = "another-training-run-and-recipe";
     fixture.file.root["components"]["text"]["config"]["num_hidden_layers"] = 2;
@@ -293,6 +296,86 @@ void native_uses() {
         "combined coverage hid an incorrect gate/up boundary");
 }
 
+void compressed_dense_binding() {
+    ModelFixture fixture;
+    fixture.file.root["components"]["text"]["config"]["intermediate_size"] = 128;
+    fixture.tensor("ffn-storage", {256, 128}, QType::NVFP4, QuantLayout::BlockScaleK16M128x4);
+    fixture.tensor("ffn-down-storage", {128, 128}, QType::NVFP4, QuantLayout::BlockScaleK16M128x4);
+    const std::string p = "text/layers/0/mlp/";
+    for (int i = 0; i < 2; ++i) {
+        fixture.file.root["bindings"][p + (i == 0 ? "gate" : "up")] = {
+            {"parts", Json::array({{{"object", "ffn-storage"},
+                                    {"range", {i * 128 * 128, (i + 1) * 128 * 128}}}})}};
+    }
+    fixture.file.root["bindings"][p + "down"]      = {{"object", "ffn-down-storage"}};
+    fixture.file.root["files"][0]["payload_bytes"] = fixture.file.payload.size();
+    fixture.file.write();
+    artifact::Reader reader(fixture.file.entry);
+    auto plain             = qwen::plan_load(reader);
+    auto compressed        = qwen::plan_load(reader, {.nvfp4_scale_compression = true});
+    const auto& dense      = std::get<qwen::DenseWeights>(compressed.weights().text.layers[0].ffn);
+    const auto& gate_ref   = compressed.parameter(dense.gate);
+    const auto& up_ref     = compressed.parameter(dense.up);
+    const auto gate_object = gate_ref.binding.parts[0].object;
+    require(gate_ref.binding.parts[0].object == up_ref.binding.parts[0].object,
+            "compressed gate/up lost their shared parent");
+    std::uint64_t gate_device_offset = 0;
+    for (const auto& placement : compressed.materialization().device_objects) {
+        const auto& geometry = reader.geometry(placement.object);
+        const auto id        = reader.directory().tensor(placement.object).id;
+        if (id == "ffn-storage" || id == "ffn-down-storage") {
+            require(placement.bytes == geometry.code_bytes,
+                    "compressed scale plane was uploaded with its source weight");
+        }
+        if (placement.object == gate_object) { gate_device_offset = placement.offset; }
+    }
+    const auto auxiliary_offset = compressed.materialization().auxiliary_device_offset;
+    const auto auxiliary_bytes  = compressed.materialization().auxiliary_device_bytes;
+    require(compressed.materialization().device_capacity_bytes <
+                plain.materialization().device_capacity_bytes,
+            "compression did not reduce planned resident weight bytes");
+    if (ninfer::test::cuda_unavailable()) { return; }
+    DeviceContext device;
+    auto model            = qwen::materialize_model(std::move(compressed), device);
+    const auto& loaded    = std::get<qwen::DenseWeights>(model->weights().text.layers[0].ffn);
+    const auto parent     = model->weight(loaded.gate).view.parts[0].parent;
+    const auto down       = native_weight(model->weight(loaded.down).view, 1.0F);
+    const auto arena_base = reinterpret_cast<std::uintptr_t>(parent->data) - gate_device_offset;
+    const auto scales_ptr = reinterpret_cast<std::uintptr_t>(parent->compressed_scales);
+    require(parent == model->weight(loaded.up).view.parts[0].parent &&
+                parent->compressed_scales != nullptr &&
+                parent->resident_bytes == parent->geometry.code_bytes &&
+                down.compressed_scales != nullptr && down.scales == nullptr &&
+                auxiliary_bytes > 0 && scales_ptr >= arena_base + auxiliary_offset &&
+                scales_ptr < arena_base + auxiliary_offset + auxiliary_bytes &&
+                model->storage_stats().device_capacity_bytes <
+                    plain.materialization().device_capacity_bytes,
+            "compressed scale storage escaped the single planned weight arena");
+    model.reset();
+    for (const auto& object : fixture.file.root["objects"]) {
+        if (object["id"] != "ffn-storage") { continue; }
+        const auto g     = weight_geometry(QType::NVFP4, QuantLayout::BlockScaleK16M128x4,
+                                           std::array<std::uint64_t, 2>{256, 128});
+        const auto begin = object["offset"].get<std::size_t>() + g.scale_offset;
+        for (std::size_t i = 0; i < g.scale_bytes; ++i) {
+            fixture.file.payload[begin + i] = std::byte(i % 256);
+        }
+    }
+    fixture.file.write();
+    artifact::Reader high_entropy(fixture.file.entry);
+    const auto fallback = qwen::plan_load(high_entropy, {.nvfp4_scale_compression = true});
+    const auto gate_object =
+        fallback.parameter(std::get<qwen::DenseWeights>(fallback.weights().text.layers[0].ffn).gate)
+            .binding.parts[0]
+            .object;
+    for (const auto& placement : fallback.materialization().device_objects) {
+        if (placement.object == gate_object) {
+            require(placement.bytes == high_entropy.geometry(gate_object).bytes,
+                    "high-entropy scales increased resident memory under compression");
+        }
+    }
+}
+
 void invalid_model_data() {
     ModelFixture fixture;
     const Json original = fixture.file.root;
@@ -325,6 +408,7 @@ int main() {
     try {
         logical_data_and_instances();
         native_uses();
+        compressed_dense_binding();
         invalid_model_data();
         std::cout << "model config, binding, resources and Use checks passed\n";
         return 0;

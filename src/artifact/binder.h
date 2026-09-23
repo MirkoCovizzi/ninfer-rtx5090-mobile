@@ -46,6 +46,12 @@ public:
     [[nodiscard]] const Reader& reader() const noexcept { return reader_; }
 
     void require_device(ObjectHandle object, std::uint64_t alignment = 256);
+    void require_device_prefix(ObjectHandle object, std::uint64_t bytes);
+    // Reserve a caller-owned Device suffix in the same immutable weight backing. No artifact
+    // bytes are read into this region; the selected model representation fills it after upload.
+    void reserve_device_bytes(std::uint64_t bytes);
+    [[nodiscard]] std::vector<std::byte>
+    read_object_range(ObjectHandle object, std::uint64_t offset, std::uint64_t bytes);
     [[nodiscard]] std::span<const std::byte> host_object(ObjectHandle object);
     [[nodiscard]] ObjectHandle resource(std::string_view component, std::string_view role);
     [[nodiscard]] HostValues values(const Binding& binding, std::optional<QType> format = {});
@@ -56,13 +62,15 @@ private:
         bool device             = false;
         bool host               = false;
         std::uint64_t alignment = 256;
+        std::optional<std::uint64_t> prefix_bytes;
         std::vector<std::byte> host_data;
     };
 
     const Reader& reader_;
     std::vector<Demand> demands_;
-    std::uint64_t read_bytes_        = 0;
-    std::uint64_t owned_value_bytes_ = 0;
+    std::uint64_t read_bytes_            = 0;
+    std::uint64_t owned_value_bytes_     = 0;
+    std::uint64_t reserved_device_bytes_ = 0;
 };
 
 } // namespace ninfer::artifact

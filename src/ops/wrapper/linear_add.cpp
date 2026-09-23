@@ -1,4 +1,5 @@
 #include "core/weight.h"
+#include "core/layout.h"
 #include "ninfer/ops/linear_add.h"
 
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
@@ -6,6 +7,7 @@
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/nvfp4/nvfp4_layout.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_compressed_scales.h"
 #include "ops/linear_add/fp8/fp8_linear_add_plan.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 #include "ops/linear_add/q4/q4_linear_add_dispatch.h"
@@ -145,6 +147,18 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, Workspac
     linear_add(x, w, residual_out, LinearPolicy::A16Only, ws, stream);
 }
 
+std::size_t linear_add_workspace_capacity_bytes(const Weight& w, LinearPolicy policy,
+                                                std::int32_t min_tokens, std::int32_t max_tokens) {
+    const auto base =
+        linear_add_workspace_capacity_bytes(w.qtype, w.n, w.k, policy, min_tokens, max_tokens);
+    if (!w.compressed_scales) { return base; }
+    (void)detail::validate_nvfp4_weight(w, "linear_add workspace", true);
+    WorkspaceLayoutBuilder layout;
+    (void)layout.alloc_bytes(nvfp4_scale_plane_bytes(w.n, w.k), 256);
+    (void)layout.alloc_bytes(base, 256);
+    return layout.peak_bytes(1);
+}
+
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPolicy policy,
                 WorkspaceArena& ws, cudaStream_t stream) {
     validate_policy(policy);
@@ -212,7 +226,7 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
     }
 
     if (w.qtype == QType::NVFP4) {
-        detail::validate_nvfp4_weight(w, "nvfp4 linear_add");
+        detail::validate_nvfp4_weight(w, "nvfp4 linear_add", true);
         const bool supported_shape = (w.n == detail::Nvfp4N5120K6144::kOutputRows &&
                                       w.k == detail::Nvfp4N5120K6144::kInputRows) ||
                                      (w.n == detail::Nvfp4N5120K17408::kOutputRows &&

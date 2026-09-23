@@ -37,6 +37,12 @@ linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
                                        std::int32_t input_rows, LinearPolicy policy,
                                        std::int32_t min_tokens, std::int32_t max_tokens);
 
+// Representation-aware query; includes temporary expansion for a compressed NVFP4 scale plane.
+[[nodiscard]] std::size_t linear_swiglu_workspace_capacity_bytes(const Weight& weight,
+                                                                 LinearPolicy policy,
+                                                                 std::int32_t min_tokens,
+                                                                 std::int32_t max_tokens);
+
 /**
  * Op: linear_swiglu
  *

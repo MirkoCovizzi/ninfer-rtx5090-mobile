@@ -90,6 +90,14 @@ int main() {
         failures += run_profile("LinearSwiGLU NVFP4_A4",
                                 {QType::NVFP4, 34816, 5120, 17408, 1803U, ActivationCompute::A4},
                                 kA4Cases, std::array<std::int32_t, 5>{32, 65, 97, 128, 129});
+        failures +=
+            run_profile("LinearSwiGLU compressed NVFP4_A16",
+                        {QType::NVFP4, 34816, 5120, 17408, 1801U, ActivationCompute::A16, true},
+                        std::array<std::int32_t, 1>{1});
+        failures += run_profile(
+            "LinearSwiGLU compressed NVFP4_A4",
+            {QType::NVFP4, 34816, 5120, 17408, 1803U, ActivationCompute::A4, true},
+            std::array<std::int32_t, 5>{1, 128, 129, 256, 257}, std::array<std::int32_t, 1>{128});
         std::cout << (failures == 0 ? "OK" : "FAIL") << " LinearSwiGLU NVFP4 correctness\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

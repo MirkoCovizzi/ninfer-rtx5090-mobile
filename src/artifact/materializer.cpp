@@ -125,6 +125,48 @@ bool MaterializedArtifact::has_device(ObjectHandle handle) const noexcept {
     return handle.index < objects_.size() && objects_[handle.index].device.has_value();
 }
 
+void MaterializedArtifact::attach_compressed_scales(ObjectHandle handle,
+                                                    std::span<const std::uint8_t> payload,
+                                                    std::span<const std::uint32_t> offsets,
+                                                    std::int32_t tiles_per_row) {
+    if (!has_device(handle)) { throw ArtifactError("compressed weight has no device backing"); }
+    auto& parent = *objects_[handle.index].device;
+    if (!arena_ || !auxiliary_device_bytes_ || parent.geometry.format != QType::NVFP4 ||
+        parent.resident_bytes != parent.geometry.code_bytes || parent.compressed_scales ||
+        payload.empty() || offsets.empty() || tiles_per_row <= 0) {
+        throw ArtifactError("invalid NVFP4 compressed scale attachment");
+    }
+    const std::size_t aligned      = (payload.size() + 255U) & ~std::size_t{255U};
+    const std::size_t offset_bytes = offsets.size() * sizeof(std::uint32_t);
+    if (aligned > std::numeric_limits<std::size_t>::max() - offset_bytes) {
+        throw ArtifactError("compressed scale backing exceeds size_t");
+    }
+    const auto start   = std::chrono::steady_clock::now();
+    const auto storage = arena_->alloc_bytes(aligned + offset_bytes, 256);
+    const auto begin   = static_cast<std::uint64_t>(static_cast<std::byte*>(storage.data) -
+                                                    static_cast<std::byte*>(arena_->base()));
+    if (begin < auxiliary_device_offset_ ||
+        storage.bytes > auxiliary_device_offset_ + auxiliary_device_bytes_ - begin) {
+        throw ArtifactError("compressed scales exceed reserved Device backing");
+    }
+    check_cuda(cudaMemcpy(storage.data, payload.data(), payload.size(), cudaMemcpyHostToDevice),
+               "upload compressed NVFP4 scales");
+    check_cuda(cudaMemcpy(static_cast<std::byte*>(storage.data) + aligned, offsets.data(),
+                          offset_bytes, cudaMemcpyHostToDevice),
+               "upload compressed NVFP4 offsets");
+    // Pageable Host copies can return before transfer completion. The consumer may use a
+    // non-blocking execution stream during Program initialization and graph capture.
+    check_cuda(cudaStreamSynchronize(nullptr), "complete compressed scale upload");
+    parent.compressed_scales        = storage.data;
+    parent.compressed_scale_offsets = reinterpret_cast<const std::uint32_t*>(
+        static_cast<const std::byte*>(storage.data) + aligned);
+    parent.compressed_scale_tiles_per_row = tiles_per_row;
+    stats_.h2d_bytes =
+        checked_add(stats_.h2d_bytes, payload.size() + offset_bytes, "compressed weight upload");
+    stats_.upload_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
 MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& plan,
                                  DeviceContext& device, const StartupObserver* startup_observer) {
     if (plan.source != &reader || plan.object_count != reader.directory().objects.size()) {
@@ -144,6 +186,8 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
     out.stats_.read_bytes            = plan.prior_read_bytes;
     out.stats_.owned_value_bytes     = plan.owned_value_bytes;
     out.stats_.device_capacity_bytes = plan.device_capacity_bytes;
+    out.auxiliary_device_offset_     = plan.auxiliary_device_offset;
+    out.auxiliary_device_bytes_      = plan.auxiliary_device_bytes;
     out.stats_.device_object_count   = plan.device_objects.size();
     out.stats_.host_object_count     = plan.host_objects.size();
     if (plan.device_capacity_bytes > std::numeric_limits<std::size_t>::max()) {
@@ -180,7 +224,9 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
     for (const auto& placement : plan.device_objects) {
         const auto& geometry = reader.geometry(placement.object);
         auto& object         = out.objects_.at(placement.object.index);
-        if (object.device || !out.arena_ || geometry.bytes != placement.bytes) {
+        if (object.device || !out.arena_ ||
+            (placement.bytes != geometry.bytes &&
+             !(geometry.format == QType::NVFP4 && placement.bytes == geometry.code_bytes))) {
             throw ArtifactError("invalid or duplicate device placement");
         }
         auto storage      = out.arena_->alloc_bytes(static_cast<std::size_t>(placement.bytes),
@@ -193,10 +239,10 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
         const auto divisor = object.host
                                  ? object.host->weight_scale_divisor
                                  : read_divisor(reader, placement.object, geometry, {}, out.stats_);
-        object.device =
-            WeightParent{geometry, static_cast<const std::byte*>(storage.data), divisor};
+        object.device = WeightParent{geometry, static_cast<const std::byte*>(storage.data), divisor,
+                                     placement.bytes};
         const auto& descriptor = reader.directory().tensor(placement.object);
-        for (const auto& segment : reader.segments(descriptor.offset, descriptor.bytes)) {
+        for (const auto& segment : reader.segments(descriptor.offset, placement.bytes)) {
             ranges.push_back({segment.file_index, segment.file_offset,
                               checked_add(segment.file_offset, segment.bytes, "copy range"),
                               static_cast<std::byte*>(storage.data) + segment.destination_offset});

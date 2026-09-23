@@ -4,6 +4,7 @@
 
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
+#include "ninfer/ops/nvfp4_scale_compression.h"
 
 #include <cuda_runtime.h>
 
@@ -88,7 +89,8 @@ int verify_preserved(const GuardedDeviceBuffer& device, std::span<const std::uin
     return 1;
 }
 
-int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
+int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed,
+              bool test_compressed_scales = false) {
     const std::array invocations{
         Invocation{1, ops::LinearPolicy::A16Only},
         Invocation{4, ops::LinearPolicy::A16Only},
@@ -244,6 +246,67 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         }
     }
 
+    if (test_compressed_scales) {
+        const std::size_t code_bytes   = static_cast<std::size_t>(n) * k / 2;
+        const std::size_t scale_offset = (code_bytes + 255U) & ~std::size_t{255U};
+        const auto scales              = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(host_weight.payload.data() + scale_offset),
+            static_cast<std::size_t>(n) * k / 16);
+        const auto packed = ops::compress_nvfp4_scale_plane(scales, n, k);
+        DeviceBuffer codes(code_bytes), payload(packed.payload.size());
+        DeviceBuffer offsets(packed.offsets.size() * sizeof(std::uint32_t));
+        codes.copy_from_host(host_weight.payload.data(), code_bytes);
+        payload.copy_from_host(packed.payload.data(), packed.payload.size());
+        offsets.copy_from_host(packed.offsets.data(), offsets.bytes);
+        Weight compressed                         = host_weight.device_weight(codes.p);
+        compressed.scales                         = nullptr;
+        compressed.payload_bytes                  = code_bytes;
+        compressed.compressed_scales              = payload.p;
+        compressed.compressed_scale_offsets       = static_cast<const std::uint32_t*>(offsets.p);
+        compressed.compressed_scale_tiles_per_row = packed.tiles_per_row;
+        for (const Invocation invocation : {Invocation{1, ops::LinearPolicy::A16Only},
+                                            Invocation{128, ops::LinearPolicy::AllowA4},
+                                            Invocation{129, ops::LinearPolicy::AllowA4}}) {
+            const std::size_t output_words = static_cast<std::size_t>(n) * invocation.tokens;
+            GuardedDeviceBuffer output(output_words * sizeof(std::uint16_t));
+            output.copy_from_host(initial_residual.data(), output.bytes());
+            Tensor x(device_activation.data(), DType::BF16, {k, invocation.tokens});
+            Tensor residual(output.data(), DType::BF16, {n, invocation.tokens});
+            const auto capacity = ops::linear_add_workspace_capacity_bytes(
+                compressed, invocation.policy, invocation.tokens, invocation.tokens);
+            WorkspaceArena workspace(capacity);
+            ops::linear_add(x, compressed, residual, invocation.policy, workspace, nullptr);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            if (workspace.peak_used() != capacity) {
+                std::cerr << "compressed linear_add: incorrect workspace capacity\n";
+                ++failures;
+            }
+            std::vector<std::uint16_t> actual_bits(output_words);
+            output.copy_to_host(actual_bits.data(), output.bytes());
+            std::vector<double> actual, expected;
+            for (std::size_t sampled_row = 0; sampled_row < rows.size(); ++sampled_row) {
+                const int row           = rows[sampled_row];
+                const float* weight_row = materialized_weight.data() + sampled_row * k;
+                for (const int token : sampled_indices(invocation.tokens)) {
+                    double sum = 0;
+                    for (int column = 0; column < k; ++column) {
+                        sum +=
+                            static_cast<double>(weight_row[column]) *
+                            bf16_to_f32(activation[static_cast<std::size_t>(token) * k + column]);
+                    }
+                    const std::size_t index = static_cast<std::size_t>(token) * n + row;
+                    actual.push_back(bf16_to_f32(actual_bits[index]));
+                    expected.push_back(sum + bf16_to_f32(initial_residual[index]));
+                }
+            }
+            failures += verify_reduction(
+                "compressed NVFP4 linear_add T=" + std::to_string(invocation.tokens), actual,
+                expected,
+                invocation.policy == ops::LinearPolicy::AllowA4 ? kA4Tolerance : kA16Tolerance);
+            failures += output.verify_guards("compressed NVFP4 linear_add output");
+        }
+    }
+
     failures += device_activation.verify_guards("NVFP4 linear_add activation");
     failures += device_weight.verify_guards("NVFP4 linear_add weight");
     failures += verify_preserved(
@@ -339,7 +402,7 @@ int main() {
     }
     int failures = 0;
     failures += run_shape(5120, 6144, 811U);
-    failures += run_shape(5120, 17408, 821U);
+    failures += run_shape(5120, 17408, 821U, true);
     failures += check_residual_cancellation(6144);
     failures += check_residual_cancellation(17408);
     std::cout << (failures == 0 ? "OK" : "FAIL") << " NVFP4 linear_add\n";

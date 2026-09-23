@@ -9,6 +9,7 @@ namespace ninfer::models {
 struct LoadOptions {
     EnginePurpose purpose          = EnginePurpose::Generation;
     bool vision                    = false;
+    bool nvfp4_scale_compression   = false;
     SpeculativeBackend speculative = SpeculativeBackend::None;
     ProposalHead proposal_head     = ProposalHead::Full;
 
@@ -53,10 +54,11 @@ struct LoadOptions {
 }
 
 [[nodiscard]] inline LoadOptions load_options(const EngineOptions& options) noexcept {
-    return {.purpose       = options.purpose,
-            .vision        = options.enable_vision,
-            .speculative   = options.speculative.backend,
-            .proposal_head = options.speculative.proposal_head};
+    return {.purpose                 = options.purpose,
+            .vision                  = options.enable_vision,
+            .nvfp4_scale_compression = options.enable_nvfp4_scale_compression,
+            .speculative             = options.speculative.backend,
+            .proposal_head           = options.speculative.proposal_head};
 }
 
 } // namespace ninfer::models

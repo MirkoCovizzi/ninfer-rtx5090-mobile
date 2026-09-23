@@ -157,7 +157,7 @@ The serial runner writes `run.jsonl`, `summary.csv`, `summary.md`, and per-serve
 category summaries. The output directory is supplied explicitly with `--output`.
 
 Its schema-v7 result and flattened summaries retain the actual `prefill_signature`, request Host
-exposure, adaptive policy, and decode Host/Device-wait time per round received from the schema-v22
+exposure, adaptive policy, and decode Host/Device-wait time per round received from the schema-v23
 serving records.
 Request exposure is a latency distribution value and is never summed across concurrent requests;
 worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete

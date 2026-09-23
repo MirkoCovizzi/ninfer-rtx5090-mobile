@@ -323,13 +323,11 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     };
     const auto linear_scratch = [&](WorkspaceLayoutBuilder& layout,
                                     const execution::LinearParameters& p, int first, int last) {
-        scratch(layout, ops::linear_workspace_capacity_bytes(p.weight.qtype, p.weight.n, p.weight.k,
-                                                             p.policy, first, last));
+        scratch(layout, ops::linear_workspace_capacity_bytes(p.weight, p.policy, first, last));
     };
     const auto add_scratch = [&](WorkspaceLayoutBuilder& layout,
                                  const execution::LinearParameters& p, int first, int last) {
-        scratch(layout, ops::linear_add_workspace_capacity_bytes(
-                            p.weight.qtype, p.weight.n, p.weight.k, p.policy, first, last));
+        scratch(layout, ops::linear_add_workspace_capacity_bytes(p.weight, p.policy, first, last));
     };
     const auto target_body = [&](WorkspaceLayoutBuilder& layout, std::int32_t first,
                                  std::int32_t last, TextPhase phase, GdnWorkspacePath path,

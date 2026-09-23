@@ -1,9 +1,12 @@
+#include "core/layout.h"
 #include "core/weight.h"
 #include "ninfer/ops/linear.h"
 
 #include "ops/linear/bf16/bf16_dispatch.h"
 #include "ops/linear/fp8/fp8_dispatch.h"
+#include "ops/linear/nvfp4/nvfp4_compressed_scales.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
+#include "ops/linear/nvfp4/nvfp4_format.h"
 #include "ops/linear/q4/q4_dispatch.h"
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
@@ -152,11 +155,36 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
 void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
             WorkspaceArena& workspace, cudaStream_t stream) {
     validate_linear_semantics(x, w, out, policy);
+    if (w.compressed_scales && !w.scales) {
+        (void)detail::validate_nvfp4_weight(w, "linear compressed weight", true);
+        auto scope        = workspace.scope();
+        const auto scales = workspace.alloc_bytes(nvfp4_scale_plane_bytes(w.n, w.k), 256);
+        Weight execution  = w;
+        execution.scales  = scales.data;
+        detail::expand_nvfp4_scales(w, static_cast<std::uint8_t*>(scales.data), stream);
+        dispatch_linear(x, execution, out, policy, &workspace, stream);
+        return;
+    }
     dispatch_linear(x, w, out, policy, &workspace, stream);
+}
+
+std::size_t linear_workspace_capacity_bytes(const Weight& w, LinearPolicy policy,
+                                            std::int32_t min_tokens, std::int32_t max_tokens) {
+    const auto base =
+        linear_workspace_capacity_bytes(w.qtype, w.n, w.k, policy, min_tokens, max_tokens);
+    if (!w.compressed_scales || w.scales) { return base; }
+    (void)detail::validate_nvfp4_weight(w, "linear workspace", true);
+    WorkspaceLayoutBuilder layout;
+    (void)layout.alloc_bytes(nvfp4_scale_plane_bytes(w.n, w.k), 256);
+    (void)layout.alloc_bytes(base, 256);
+    return layout.peak_bytes(1);
 }
 
 void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     validate_linear_semantics(x, w, out, LinearPolicy::A16Only);
+    if (w.compressed_scales) {
+        throw std::invalid_argument("compressed NVFP4 Linear requires caller-owned workspace");
+    }
     dispatch_linear(x, w, out, LinearPolicy::A16Only, nullptr, stream);
 }
 

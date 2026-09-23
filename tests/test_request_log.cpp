@@ -55,6 +55,7 @@ int main() {
     options.speculative.mtp_draft_policy   = ninfer::MtpDraftPolicy::Adaptive;
     options.speculative.proposal_head      = ninfer::ProposalHead::Optimized;
     options.enable_vision                  = false;
+    options.enable_nvfp4_scale_compression = true;
     options.allow_prefix_reuse             = true;
     options.preserve_thinking              = true;
     options.default_thinking_budget        = 512;
@@ -62,22 +63,23 @@ int main() {
     options.startup_argv = {"ninfer-serve", options.artifact_path, "--api-key", "<redacted>"};
 
     ninfer::EngineOptions engine_options;
-    engine_options.artifact_path                                   = options.artifact_path;
-    engine_options.device                                          = options.device;
-    engine_options.max_context                                     = options.max_context;
-    engine_options.max_concurrency                                 = 2;
-    engine_options.max_pending_requests                            = options.max_pending_requests;
-    engine_options.pending_timeout_ms                              = options.pending_timeout_ms;
-    engine_options.prefill_chunk                                   = options.prefill_chunk;
-    engine_options.kv_cache                                        = options.kv_cache;
-    engine_options.speculative                                     = options.speculative;
-    engine_options.enable_vision                                   = options.enable_vision;
-    engine_options.use_cuda_graph                                  = options.use_cuda_graph;
-    engine_options.context_cache.device_state_slots                = 2;
-    engine_options.context_cache.host_state_slots                  = 3;
-    engine_options.context_cache.host_kv_capacity_bytes            = 64ULL << 20;
-    engine_options.context_cache.max_private_continuations         = 4;
-    engine_options.context_cache.max_shared_prefixes               = 2;
+    engine_options.artifact_path                           = options.artifact_path;
+    engine_options.device                                  = options.device;
+    engine_options.max_context                             = options.max_context;
+    engine_options.max_concurrency                         = 2;
+    engine_options.max_pending_requests                    = options.max_pending_requests;
+    engine_options.pending_timeout_ms                      = options.pending_timeout_ms;
+    engine_options.prefill_chunk                           = options.prefill_chunk;
+    engine_options.kv_cache                                = options.kv_cache;
+    engine_options.speculative                             = options.speculative;
+    engine_options.enable_vision                           = options.enable_vision;
+    engine_options.enable_nvfp4_scale_compression          = options.enable_nvfp4_scale_compression;
+    engine_options.use_cuda_graph                          = options.use_cuda_graph;
+    engine_options.context_cache.device_state_slots        = 2;
+    engine_options.context_cache.host_state_slots          = 3;
+    engine_options.context_cache.host_kv_capacity_bytes    = 64ULL << 20;
+    engine_options.context_cache.max_private_continuations = 4;
+    engine_options.context_cache.max_shared_prefixes       = 2;
     engine_options.context_cache.max_long_anchors_per_continuation = 2;
 
     const ninfer::ModelSamplingDefaults sampling_defaults{
@@ -202,6 +204,8 @@ int main() {
     failures += check(kvarn_server.at("engine").at("kv_cache") == "kvarn-k4v2-group128",
                       "KVarN G128 KV report name missing");
     failures += check(server.at("engine").at("vision") == false, "Vision state missing");
+    failures += check(server.at("engine").at("nvfp4_scale_compression") == true,
+                      "NVFP4 scale compression startup state missing");
     failures += check(server.at("engine").at("speculative_backend") == "mtp",
                       "speculative backend missing");
     failures +=

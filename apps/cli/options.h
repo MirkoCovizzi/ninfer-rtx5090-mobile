@@ -27,8 +27,9 @@ struct Options {
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
-    bool enable_vision  = false;
-    bool use_cuda_graph = true;
+    bool enable_vision                  = false;
+    bool enable_nvfp4_scale_compression = false;
+    bool use_cuda_graph                 = true;
 
     bool raw_output      = false;
     bool print_token_ids = false;

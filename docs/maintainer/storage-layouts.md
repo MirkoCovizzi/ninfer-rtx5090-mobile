@@ -273,6 +273,14 @@ The payload is a row-major E2M1 packed-code plane, zero padding to `scale_plane_
 swizzled E4M3FN scale plane, and the little-endian FP32 weight-divisor word. Within each packed code
 byte, the low nibble is the smaller K coordinate and the high nibble is the next coordinate.
 
+Opt-in runtime NVFP4 scale compression does not change these artifact bytes. For selected dense
+FFN parents with `K%128=0`, the loader reads the stored scale plane, uploads only the code-plane
+prefix, and retains a lossless palette/escape encoding of scales in the same model-owned Device
+weight arena. Each 128-row by eight-K16-group tile has 15 palette entries, 4-bit indices (15 is an
+escape), and eight-row escape-rank prefixes. Linear/LinearSwiGLU/LinearAdd expand the exact scale
+bytes into caller-owned workspace before consuming the native swizzled layout. The FP32 divisor
+remains a scalar on the parent; no compressed plane is written back into `.ninfer`.
+
 For logical row `n`, scale-group coordinate `g=floor(k/16)`, and `K_tiles=K/64`, define:
 
 ```text
