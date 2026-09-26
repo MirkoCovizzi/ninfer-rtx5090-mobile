@@ -30,7 +30,7 @@ constexpr ReductionCriterion kAttnInputProjA16Tolerance{2.9e-3, 4.0e-3, 4.5e-3};
 // FP8 A16 reuses the qualified Linear decode arithmetic profile rather than the other A16
 // attention-input implementations' reduction profile.
 constexpr ReductionCriterion kFp8AttnInputProjA16Tolerance{1.0 / 256.0, 1.0 / 256.0, 2.0 / 256.0};
-constexpr ReductionCriterion kAttnInputProjA8Tolerance{0.05, 1.0 / 256.0, 0.06};
+constexpr ReductionCriterion kAttnInputProjA8Tolerance{0.04, 1.0 / 256.0, 0.06};
 constexpr ReductionCriterion kAttnInputProjA4Tolerance{0.16, 1.0 / 256.0, 0.16};
 // Retain the original seven grid points while stabilizing the distribution-level A4 criterion.
 constexpr std::int32_t kA4SampleRows = 31;
@@ -167,7 +167,10 @@ int run_q4_q5() {
     for (int t : {129, 144, 145, 160, 161, 192, 193, 256, 257, 1024})
         failures +=
             run_target_projection_case(query_key, &gate_value, t, ops::LinearPolicy::A16Only);
-    for (int t : {1, 8, 12, 13, 16, 32, 63, 64, 65, 96, 104, 105, 127, 128, 129, 192, 193})
+    // The replayed set covers the Q5 split4 band's new counts (7 and 9) next to the ones already
+    // there, so the instances this change re-routes are replayed with a re-poisoned output and a
+    // changed activation at the captured address.
+    for (int t : {1, 7, 8, 9, 12, 13, 16, 32, 63, 64, 65, 96, 104, 105, 127, 128, 129, 192, 193})
         failures +=
             run_target_projection_case(query_key, &gate_value, t, ops::LinearPolicy::A16Only, true);
     return failures;
@@ -245,14 +248,14 @@ int verify_direct_output_sampled(std::string_view label, const GuardedBf16Tensor
     return failures;
 }
 
-int run_bf16_target_case(DeviceWeight& parent, std::int32_t tokens) {
-    constexpr std::int32_t kHidden      = 5120;
-    constexpr std::int32_t kQRows       = 6144;
-    constexpr std::int32_t kKvRows      = 1024;
-    constexpr std::int32_t kParentRows  = 14336;
-    const std::vector<float> activation = make_bf16_activation(kHidden, tokens, 317U + tokens);
-    const std::vector<std::uint16_t> activation_bits = bf16_bits(activation);
-    DeviceBuffer device_activation                   = to_device(activation_bits);
+int run_bf16_target_case(DeviceWeight& parent, std::int32_t tokens, bool replay = false) {
+    constexpr std::int32_t kHidden     = 5120;
+    constexpr std::int32_t kQRows      = 6144;
+    constexpr std::int32_t kKvRows     = 1024;
+    constexpr std::int32_t kParentRows = 14336;
+    std::vector<float> activation      = make_bf16_activation(kHidden, tokens, 317U + tokens);
+    std::vector<std::uint16_t> activation_bits = bf16_bits(activation);
+    DeviceBuffer device_activation             = to_device(activation_bits);
 
     GuardedBf16Tensor query(kQRows, tokens);
     GuardedBf16Tensor gate(kQRows, tokens);
@@ -263,14 +266,36 @@ int run_bf16_target_case(DeviceWeight& parent, std::int32_t tokens) {
     Tensor g = gate.tensor();
     Tensor k = key.tensor();
     Tensor v = value.tensor();
-    ops::attn_input_proj(x, parent.view(), q, g, k, v, nullptr);
+    DeviceContext context;
+    // The fixture poisons outputs on the default stream; order it before the nonblocking stream.
     cuda_synchronize();
+    const auto launch = [&] { ops::attn_input_proj(x, parent.view(), q, g, k, v, context.stream); };
+    DecodeGraphDefinition definition;
+    DecodeGraphExecutable graph;
+    if (replay) {
+        definition.capture(context.stream, launch);
+        graph.instantiate(definition);
+        graph.launch(context.stream);
+        cuda_synchronize(context.stream);
+        for (auto& value : activation) value = -value;
+        activation_bits = bf16_bits(activation);
+        device_activation.copy_from_host(activation_bits.data(), device_activation.bytes);
+        query.repaint(context.stream);
+        gate.repaint(context.stream);
+        key.repaint(context.stream);
+        value.repaint(context.stream);
+        graph.launch(context.stream);
+    } else {
+        launch();
+    }
+    cuda_synchronize(context.stream);
 
     constexpr std::int32_t kKeyBegin   = kQRows;
     constexpr std::int32_t kGateBegin  = kKeyBegin + kKvRows;
     constexpr std::int32_t kValueBegin = kGateBegin + kQRows;
-    const std::string suffix           = " BF16 A16 T=" + std::to_string(tokens);
-    int failures                       = 0;
+    const std::string suffix =
+        " BF16 A16 T=" + std::to_string(tokens) + (replay ? " graph" : " eager");
+    int failures = 0;
     if (tokens == 1) {
         const std::vector<double> expected = bf16_attention_oracle(parent.host, activation);
         failures += verify_direct_output(
@@ -313,9 +338,13 @@ int run_bf16_target() {
         ++failures;
     }
     for (const std::int32_t tokens :
-         {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17, 22, 23, 32, 33, 128, 129, 1024}) {
+         {1,  2,  3,  4,  5,   6,   7,   8,   9,   10,  11,  12,  13,  15,
+          16, 17, 31, 32, 33,  22,  23,  34,  48,  49,  63,  64,  65,  66,
+          95, 96, 97, 98, 127, 128, 129, 130, 191, 192, 193, 194, 1024}) {
         failures += run_bf16_target_case(parent, tokens);
     }
+    for (const std::int32_t tokens : {4, 5, 16, 17, 32, 33, 64, 65, 96, 97, 128, 129, 192, 193})
+        failures += run_bf16_target_case(parent, tokens, true);
     return failures;
 }
 
@@ -403,8 +432,6 @@ int run_nvfp4_target() {
     for (const std::int32_t tokens : {1, 2, 4, 8, 16, 20, 32, 33}) {
         failures += run_nvfp4_target_case(parent, tokens, ops::LinearPolicy::A16Only, tokens == 1);
     }
-    failures += run_nvfp4_target_case(parent, 1, ops::LinearPolicy::AllowA4);
-    failures += run_nvfp4_target_case(parent, 2, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_target_case(parent, 4, ops::LinearPolicy::AllowA8);
     failures += run_nvfp4_target_case(parent, 4, ops::LinearPolicy::AllowA8, true);
     failures += run_nvfp4_target_case(parent, 4, ops::LinearPolicy::AllowA4);
@@ -522,9 +549,7 @@ int run_q8_qkv_case(DevicePackedWeight& parent, std::int32_t hidden, const char*
         if (phase) {
             for (auto& element : activation) element = -element;
             activation_bits = bf16_bits(activation);
-            cuda_check(cudaMemcpyAsync(device_activation.p, activation_bits.data(),
-                                       device_activation.bytes, cudaMemcpyHostToDevice, stream),
-                       "update graph input");
+            device_activation.copy_from_host(activation_bits.data(), device_activation.bytes);
         }
         cuda_check(
             cudaMemsetAsync(q.data, 0xff, static_cast<std::size_t>(kQRows) * tokens * 2, stream),

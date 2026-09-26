@@ -155,10 +155,11 @@ public:
         : options(runtime::normalize_engine_options(std::move(engine_options))),
           device(initialize_device(options)) {
         nvtx::ScopedRange load_range(nvtx::Name::EngineLoad, nvtx::Category::Runtime);
-        auto constructed  = runtime::construct_model(options, device);
-        active            = std::move(constructed.instance);
-        load              = std::move(constructed.load);
-        sampling_defaults = active->frontend.sampling_defaults();
+        auto constructed    = runtime::construct_model(options, device);
+        active              = std::move(constructed.instance);
+        load                = std::move(constructed.load);
+        load.cuda_sync_mode = device.sync_mode();
+        sampling_defaults   = active->frontend.sampling_defaults();
         StartupPhaseScope finalize_phase(options.startup_observer, StartupPhase::EngineFinalize);
         if (options.purpose == EnginePurpose::CausalScoring) {
             core = std::make_unique<ScoringCore>(*active, device);

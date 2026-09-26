@@ -1,5 +1,7 @@
 #include "ninfer/ops/gated_delta_net.h"
+
 #include "core/device.h"
+#include "ops/linear_attention/gated_delta_net/launch.h"
 
 #include "ops/op_tester.h"
 
@@ -119,10 +121,10 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     Tensor gate_record_tensor(gate_record.p, DType::FP32, {2, value_heads, width, batch});
 
     constexpr float kScale = 1.0F / std::sqrt(128.0F);
-    WorkspaceArena reference_workspace(256);
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
     cuda_synchronize();
+    // Replay is bitwise equivalent to recurrence, independently of the prefill dispatcher.
     const auto launch_reference = [&] {
         CUDA_CHECK(cudaMemsetAsync(reference_out.p, 0, reference_out.bytes, stream));
         for (std::int32_t row = 0; row < batch; ++row) {
@@ -150,8 +152,9 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
                                  .view({kStateDim, value_heads, valid_extent});
             Tensor final_row =
                 reference_final_states.slice(3, row, 1).view({kStateDim, kStateDim, value_heads});
-            ops::gated_delta_net(q_row, k_row, v_row, g_row, beta_row, kScale, true,
-                                 reference_workspace, state_row, final_row, out_row, stream);
+            ops::detail::gated_delta_net::launch_recurrent_inout(q_row, k_row, v_row, g_row,
+                                                                 beta_row, kScale, true, state_row,
+                                                                 final_row, out_row, stream);
         }
     };
     const auto launch_record = [&] {

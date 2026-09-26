@@ -53,7 +53,7 @@ ninfer_add_test(ninfer_qwen3_5_score_real_test
 
 ninfer_add_op_test(ninfer_qwen3_5_prefill_precision_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_prefill_precision_real.cpp"
-  LIBRARIES ninfer_engine ninfer_serve)
+  LIBRARIES ninfer_model_runtime ninfer_engine ninfer_serve)
 
 ninfer_add_test(ninfer_qwen3_5_mtp_greedy_parity_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_mtp_greedy_parity_real.cpp"
