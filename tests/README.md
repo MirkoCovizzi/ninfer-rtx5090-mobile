@@ -168,6 +168,16 @@ corresponding INT8 gate. Selecting a draft depth always retains the no-MTP refer
 An explicit `--corpus PATH` enables long resident prompts: samples 3..7 contain 8,190, 32,799,
 122,879, 196,607, and 245,743 tokens. Use `--prefix-reuse --concurrency 2` to exercise restored,
 unequal concurrent rows, or `--no-cuda-graph --full-proposal-head` for eager/full-head execution.
+Sample 8 uses eight distinct 231-token corpus slices (offsets `128 * row`) and equal output
+budgets to exercise short, low-acceptance compact batches. The C8/MTP3 regression command is:
+
+```bash
+NINFER_TEST_ARTIFACT=/path/to/qwen3_8_27b_nvfp4.ninfer \
+  build/tests/ninfer_qwen3_5_mtp_greedy_parity_real_test \
+  --corpus bench/fixtures/bench_corpus.ids --sample 8 --concurrency 8 \
+  --kv-dtype kvarn --draft-tokens 3 --prefill-chunk 2048 --output-tokens 513
+```
+
 The same KVarN harness accepts `--spec dflash2`, with draft counts 1, 3, 7, and 15, against the
 same-backend repeatability criterion; its artifact must contain the DFlash2 companion.
 KVarN MTP verification stops at group-publication boundaries so later queries see the same
