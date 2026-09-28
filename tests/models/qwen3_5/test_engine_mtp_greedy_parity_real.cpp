@@ -109,9 +109,9 @@ struct ParityCases {
 
 void verify_parity(const char* artifact, KvProfile profile, const ParityCases& cases) {
     constexpr std::array<std::uint32_t, 5> long_contexts{8190, 32799, 122879, 196607, 245743};
-    const int samples = cases.corpus.empty() ? 3 : 8;
-    if (cases.sample >= samples) { throw std::invalid_argument("long samples require --corpus"); }
-    std::array<std::array<std::vector<ninfer::TokenId>, kMaximumConcurrency>, 8> expected;
+    const int samples = cases.corpus.empty() ? 3 : 9;
+    if (cases.sample >= samples) { throw std::invalid_argument("corpus samples require --corpus"); }
+    std::array<std::array<std::vector<ninfer::TokenId>, kMaximumConcurrency>, 9> expected;
     const bool dflash2                      = cases.backend == ninfer::SpeculativeBackend::DFlash2;
     const std::vector<std::uint32_t> depths = dflash2
                                                   ? std::vector<std::uint32_t>{0, 1, 3, 7, 15}
@@ -124,11 +124,13 @@ void verify_parity(const char* artifact, KvProfile profile, const ParityCases& c
             auto options = engine_options(artifact, profile.storage, depth, cases.concurrency);
             options.speculative.backend =
                 depth == 0 ? ninfer::SpeculativeBackend::None : cases.backend;
-            const auto prompt_capacity = cases.sample >= 3 ? long_contexts[cases.sample - 3]
-                                                           : (cases.sample == 0   ? 128U
-                                                              : cases.sample == 1 ? 1024U
-                                                                                  : 4096U);
+            const auto prompt_capacity = cases.sample == 8   ? 231U
+                                         : cases.sample >= 3 ? long_contexts[cases.sample - 3]
+                                                             : (cases.sample == 0   ? 128U
+                                                                : cases.sample == 1 ? 1024U
+                                                                                    : 4096U);
             options.max_context        = cases.output_tokens + prompt_capacity + 16;
+            if (cases.sample == 8) { options.max_context = std::max(16384U, options.max_context); }
             options.kv_capacity    = ninfer::KvCapacityPolicy::explicit_capacity(cases.concurrency *
                                                                                  options.max_context);
             options.prefill_chunk  = cases.prefill_chunk;
@@ -146,6 +148,17 @@ void verify_parity(const char* artifact, KvProfile profile, const ParityCases& c
             for (int sample = 0; sample < samples; ++sample) {
                 if (cases.sample >= 0 && sample != cases.sample) { continue; }
                 const auto prepare = [&](std::uint32_t row) {
+                    if (sample == 8) {
+                        // Short, distinct corpus slices exercise low-acceptance compact batches.
+                        // Equal output budgets preserve the full C8 frontier through the run.
+                        const std::size_t begin = 128 * row;
+                        if (cases.corpus.size() < begin + 231) {
+                            throw std::invalid_argument(
+                                "corpus is shorter than the selected prompt");
+                        }
+                        return engine.prepare_tokens(std::vector<ninfer::TokenId>(
+                            cases.corpus.begin() + begin, cases.corpus.begin() + begin + 231));
+                    }
                     const auto raw_prompt = [&](std::vector<ninfer::TokenId> tokens) {
                         // Distinct branches keep every prewarmed endpoint resident. Nested raw
                         // prefixes otherwise extend one continuation and replace its endpoint.
@@ -211,7 +224,7 @@ void verify_parity(const char* artifact, KvProfile profile, const ParityCases& c
                     auto prepared = prepare(row);
                     prompt_tokens.push_back(prepared.summary().prompt_tokens);
                     auto row_request = request;
-                    row_request.execution.requested_output_tokens -= row;
+                    if (sample != 8) { row_request.execution.requested_output_tokens -= row; }
                     handles.push_back(engine.submit(std::move(prepared), row_request));
                 }
                 for (std::uint32_t row = 0; row < cases.concurrency; ++row) {
@@ -220,7 +233,8 @@ void verify_parity(const char* artifact, KvProfile profile, const ParityCases& c
                         std::string(profile.name) + " k=" + std::to_string(depth) +
                         " sample=" + std::to_string(sample) + " row=" + std::to_string(row) +
                         " prompt=" + std::to_string(prompt_tokens[row]);
-                    if (result.generated_token_ids.size() != cases.output_tokens - row) {
+                    if (result.generated_token_ids.size() !=
+                        cases.output_tokens - (sample == 8 ? 0 : row)) {
                         throw std::runtime_error(label +
                                                  " did not reach the requested decode length");
                     }
@@ -288,7 +302,7 @@ int main(int argc, char** argv) {
                 }
                 if (argument == "--output-tokens" && number >= 128 && number <= 16384) {
                     cases.output_tokens = number;
-                } else if (argument == "--sample" && number < 8) {
+                } else if (argument == "--sample" && number < 9) {
                     cases.sample = static_cast<int>(number);
                 } else if (argument == "--draft-tokens" && number >= 1 && number <= 15) {
                     cases.depth = static_cast<int>(number);
@@ -323,7 +337,7 @@ int main(int argc, char** argv) {
             } else {
                 throw std::invalid_argument(
                     "usage: mtp_greedy_parity_real_test "
-                    "[--output-tokens 128..16384] [--sample 0..7] "
+                    "[--output-tokens 128..16384] [--sample 0..8] "
                     "[--spec mtp|dflash2] [--draft-tokens K] [--prefill-chunk 1..4096] "
                     "[--concurrency 1..8] [--full-proposal-head] "
                     "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|kvarn] "

@@ -8,6 +8,10 @@ namespace ninfer::ops::detail {
 // owns predicates and synchronization; epilogues only receive valid coordinates.
 struct LinearIdentityEpilogue {
     __device__ __forceinline__ float apply(int, int, float value) const { return value; }
+
+    __device__ __forceinline__ float apply_scaled(int, int, float value, float scale) const {
+        return value * scale;
+    }
 };
 
 struct LinearResidualAddEpilogue {
@@ -15,6 +19,13 @@ struct LinearResidualAddEpilogue {
 
     __device__ __forceinline__ float apply(int row, int token, float value) const {
         return value + residual.load(row, token);
+    }
+
+    // Scaling belongs to the fused residual update. Make its single rounding explicit: a
+    // caller's live-column predicate must not decide whether the compiler contracts MUL+ADD.
+    __device__ __forceinline__ float apply_scaled(int row, int token, float value,
+                                                  float scale) const {
+        return __fmaf_rn(value, scale, residual.load(row, token));
     }
 };
 

@@ -340,15 +340,18 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_a4_t
 #pragma unroll
             for (int mr = 0; mr < Schedule::kMmaRows; ++mr) {
                 const int row = warp_n * Schedule::kWarpRows + mr * 8 + ac;
-                float a = accumulators[mt][mr][0] * alpha, b = accumulators[mt][mr][1] * alpha;
-                float c = accumulators[mt][mr][2] * alpha, d = accumulators[mt][mr][3] * alpha;
+                float a = 0.0F, b = 0.0F, c = 0.0F, d = 0.0F;
                 if (token_begin + t0 < token_count) {
-                    a = epilogue.apply(row_begin + row, token_begin + t0, a);
-                    b = epilogue.apply(row_begin + row + 1, token_begin + t0, b);
+                    a = epilogue.apply_scaled(row_begin + row, token_begin + t0,
+                                              accumulators[mt][mr][0], alpha);
+                    b = epilogue.apply_scaled(row_begin + row + 1, token_begin + t0,
+                                              accumulators[mt][mr][1], alpha);
                 }
                 if (token_begin + t1 < token_count) {
-                    c = epilogue.apply(row_begin + row, token_begin + t1, c);
-                    d = epilogue.apply(row_begin + row + 1, token_begin + t1, d);
+                    c = epilogue.apply_scaled(row_begin + row, token_begin + t1,
+                                              accumulators[mt][mr][2], alpha);
+                    d = epilogue.apply_scaled(row_begin + row + 1, token_begin + t1,
+                                              accumulators[mt][mr][3], alpha);
                 }
                 *reinterpret_cast<__nv_bfloat162*>(tile + t0 * stride + row) =
                     __floats2bfloat162_rn(a, b);

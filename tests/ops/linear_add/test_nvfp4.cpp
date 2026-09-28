@@ -232,6 +232,81 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
     return failures;
 }
 
+int check_residual_cancellation(std::int32_t k) {
+    constexpr int n = 5120, max_tokens = 1025;
+    auto packed = quantized_weight::make_patterned_weight(
+        QType::NVFP4, n, k, 823U, {.weight_scale_divisor = 0.13F, .input_scale_divisor = 1.0F});
+    // A single nonzero product per row is exactly representable before global scaling.
+    // The residual nearly cancels it, exposing width-dependent rounding of scale+add.
+    std::fill_n(packed.payload.begin(), static_cast<std::size_t>(n) * k / 2, 0);
+    std::fill_n(packed.payload.begin() + packed.scale_plane_offset, packed.scale_plane_bytes, 0);
+    for (int row = 0; row < n; ++row) {
+        packed.payload[static_cast<std::size_t>(row) * k / 2] = 0x07; // E2M1: 6
+        const auto scale                                      = packed.scale_plane_offset +
+                           static_cast<std::size_t>(row / 128) * (k / 64) * 512 + (row % 32) * 16 +
+                           (row % 128) / 32 * 4;
+        packed.payload[scale] = 0x0d; // E4M3: 13/512
+    }
+    const double ideal       = 6.0 * quantized_weight::logical_weight_fp64(packed, 0, 0);
+    const auto residual_bits = f32_to_bf16(-static_cast<float>(ideal));
+    std::vector<std::uint16_t> input(static_cast<std::size_t>(k) * max_tokens, 0);
+    for (int token = 0; token < max_tokens; ++token) { input[token * k] = f32_to_bf16(6.0F); }
+    // Include uncancelled rows as well: the existing tensor-level relative-L2 criterion
+    // needs a nonzero reference norm, while the cancelled rows probe small absolute errors.
+    std::vector<std::uint16_t> initial(static_cast<std::size_t>(n) * max_tokens);
+    for (std::size_t i = 0; i < initial.size(); ++i) { initial[i] = i % 2 ? 0 : residual_bits; }
+    std::vector<double> oracle(n);
+    for (int row = 0; row < n; ++row) {
+        oracle[row] = ideal + static_cast<double>(bf16_to_f32(initial[row]));
+    }
+    GuardedDeviceBuffer device_weight(packed.payload.size());
+    device_weight.copy_from_host(packed.payload.data(), packed.payload.size());
+    const Weight weight = packed.device_weight(device_weight.data());
+    GuardedDeviceBuffer device_input(input.size() * sizeof(std::uint16_t));
+    device_input.copy_from_host(input.data(), device_input.bytes());
+
+    int failures = 0;
+    std::vector<int> widths;
+    // GDN output permits A4 only beyond the compact A16 frontier; MLP down uses A4 throughout.
+    if (k == 17408) {
+        for (int t = 1; t <= 48; ++t) { widths.push_back(t); }
+    }
+    for (int t : {49, 63, 64, 65, 127, 128, 129, 191, 192, 193, 383, 384, 385, 511, 512, 513, 1023,
+                  1024, 1025}) {
+        widths.push_back(t);
+    }
+    std::vector<std::uint16_t> reference;
+    for (const int t : widths) {
+        GuardedDeviceBuffer output(static_cast<std::size_t>(n) * t * sizeof(std::uint16_t));
+        output.copy_from_host(initial.data(), output.bytes());
+        Tensor x(device_input.data(), DType::BF16, {k, t});
+        Tensor residual(output.data(), DType::BF16, {n, t});
+        const auto capacity = ops::linear_add_workspace_capacity_bytes(
+            QType::NVFP4, n, k, ops::LinearPolicy::AllowA4, t, t);
+        WorkspaceArena workspace(capacity);
+        ops::linear_add(x, weight, residual, ops::LinearPolicy::AllowA4, workspace, nullptr);
+        cuda_check(cudaDeviceSynchronize(), "synchronize cancellation LinearAdd");
+        std::vector<std::uint16_t> actual(static_cast<std::size_t>(n) * t);
+        output.copy_to_host(actual.data(), output.bytes());
+        const std::string label =
+            "NVFP4 residual cancellation K=" + std::to_string(k) + " T=" + std::to_string(t);
+        if (t == widths.front()) { reference.assign(actual.begin(), actual.begin() + n); }
+        bool equal = true;
+        for (std::size_t i = 0; i < actual.size(); ++i) { equal &= actual[i] == reference[i % n]; }
+        if (!equal) {
+            std::cerr << label << ": identical columns changed with tile occupancy\n";
+            ++failures;
+        }
+        std::vector<double> observed(n);
+        for (int row = 0; row < n; ++row) { observed[row] = bf16_to_f32(actual[row]); }
+        failures += verify_reduction(label, observed, oracle, kA4Tolerance);
+        failures += output.verify_guards(label);
+    }
+    failures += device_input.verify_guards("cancellation input");
+    failures += device_weight.verify_guards("cancellation weight");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -242,6 +317,8 @@ int main() {
     int failures = 0;
     failures += run_shape(5120, 6144, 811U);
     failures += run_shape(5120, 17408, 821U);
+    failures += check_residual_cancellation(6144);
+    failures += check_residual_cancellation(17408);
     std::cout << (failures == 0 ? "OK" : "FAIL") << " NVFP4 linear_add\n";
     return failures == 0 ? 0 : 1;
 }
