@@ -106,21 +106,24 @@ struct ParityCases {
     int depth                          = -1;
     bool graphs                        = true;
     bool prefix_reuse                  = false;
+    bool disable_context_cache         = false;
     bool full_proposal_head            = false;
     bool adaptive                      = false;
+    bool compressed_scales             = false;
     bool tool_loop                     = false;
     std::vector<ninfer::TokenId> corpus;
 };
 
-void verify_tool_loop(const char* artifact, KvProfile profile) {
+void verify_tool_loop(const char* artifact, KvProfile profile, bool compressed_scales) {
     std::vector<ninfer::PromptInput> prompts;
     std::vector<ninfer::GenerationResult> expected;
     for (const bool adaptive : {false, true}) {
         auto options = engine_options(artifact, profile.storage, adaptive ? 15U : 0U, 2, adaptive);
-        options.max_context    = 65536;
-        options.kv_capacity    = ninfer::KvCapacityPolicy::explicit_capacity(65536);
-        options.prefill_chunk  = 2048;
-        options.use_cuda_graph = true;
+        options.enable_nvfp4_scale_compression = compressed_scales;
+        options.max_context                    = 65536;
+        options.kv_capacity                    = ninfer::KvCapacityPolicy::explicit_capacity(65536);
+        options.prefill_chunk                  = 2048;
+        options.use_cuda_graph                 = true;
         options.context_cache.device_state_slots     = 2;
         options.context_cache.host_state_slots       = 2;
         options.context_cache.host_kv_capacity_bytes = 512ULL << 20;
@@ -247,10 +250,15 @@ void verify_parity(const char* artifact, KvProfile profile, const ParityCases& c
             // Reserve independently rounded rows. Rounding only the total under-reserves a page
             // for ragged long prompts and can serialize this concurrency test (e.g. sample 4).
             const auto kv_per_request = ((options.max_context + 127U) / 128U) * 128U;
+            // A smaller logical ceiling can make the rounded capacity exceed C logical
+            // address spaces for KV formats whose pages are smaller than 128 tokens.
+            options.max_context = kv_per_request;
             options.kv_capacity =
                 ninfer::KvCapacityPolicy::explicit_capacity(cases.concurrency * kv_per_request);
-            options.prefill_chunk  = cases.prefill_chunk;
-            options.use_cuda_graph = cases.graphs;
+            options.prefill_chunk                  = cases.prefill_chunk;
+            options.use_cuda_graph                 = cases.graphs;
+            options.enable_nvfp4_scale_compression = cases.compressed_scales;
+            options.context_cache.enabled          = !cases.disable_context_cache;
             if (cases.full_proposal_head) {
                 options.speculative.proposal_head = ninfer::ProposalHead::Full;
             }
@@ -498,10 +506,14 @@ int main(int argc, char** argv) {
                 cases.graphs = false;
             } else if (argument == "--prefix-reuse") {
                 cases.prefix_reuse = true;
+            } else if (argument == "--no-context-cache") {
+                cases.disable_context_cache = true;
             } else if (argument == "--full-proposal-head") {
                 cases.full_proposal_head = true;
             } else if (argument == "--adaptive") {
                 cases.adaptive = true;
+            } else if (argument == "--nvfp4-scale-compression") {
+                cases.compressed_scales = true;
             } else if (argument == "--tool-loop") {
                 cases.tool_loop = true;
             } else if (argument == "--corpus" && index + 1 < argc) {
@@ -519,11 +531,17 @@ int main(int argc, char** argv) {
                     "[--prefill-chunk 1..4096] "
                     "[--concurrency 1..8] [--full-proposal-head] "
                     "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|kvarn] "
-                    "[--no-cuda-graph] [--prefix-reuse] [--corpus PATH] [--tool-loop]");
+                    "[--no-cuda-graph] [--prefix-reuse] [--no-context-cache] "
+                    "[--corpus PATH] [--tool-loop] "
+                    "[--nvfp4-scale-compression]");
             }
         }
         if (cases.adaptive && cases.backend != ninfer::SpeculativeBackend::Mtp) {
             throw std::invalid_argument("--adaptive requires --spec mtp");
+        }
+        if (cases.disable_context_cache && (cases.prefix_reuse || cases.tool_loop)) {
+            throw std::invalid_argument(
+                "--no-context-cache cannot be combined with prefix/tool reuse");
         }
         if (cases.backend == ninfer::SpeculativeBackend::DFlash2) {
             if (cases.depth >= 0 && cases.depth != 1 && cases.depth != 3 && cases.depth != 7 &&
@@ -536,7 +554,7 @@ int main(int argc, char** argv) {
         for (const KvProfile profile : kKvProfiles) {
             if (!selected_kv.empty() && profile.name != selected_kv) { continue; }
             if (cases.tool_loop) {
-                verify_tool_loop(artifact, profile);
+                verify_tool_loop(artifact, profile, cases.compressed_scales);
             } else {
                 verify_parity(artifact, profile, cases);
             }
