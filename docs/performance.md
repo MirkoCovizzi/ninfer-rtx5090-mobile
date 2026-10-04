@@ -21,9 +21,11 @@ the extra A16-tight represented-A8 criterion because of FP32 dot accumulation er
 the public A8 criterion. The final cancellation fixture keeps the dot exact rather than relaxing
 its criterion. Normal and wide-exponent inputs retain the full-range packed-weight oracle.
 
-Nineteen focused tests passed: codec exact decoding/guards/Graph replay, loading and binding,
+Twenty-five focused tests passed: codec exact decoding/guards/Graph replay, loading and binding,
 NVFP4 Linear/LinearAdd/SwiGLU, FP8 A8 Linear/LinearAdd/SwiGLU and input projections, replay state,
-MTP control, CLI/server options, OpenAI schema and request logging. Test review also corrected
+MTP control, CLI/server options, OpenAI schema and request logging, plus the causal attention
+suite (including NVFP4/K8V4), Q8 Linear, graph lifecycle and model runtime mechanisms.
+Test review also corrected
 a stale artifact-object handle, restored compact A16 cancellation coverage, fixed its zero-size
 workspace fixture, and aligned the real test's logical context ceiling with its rounded KV
 reservation. No tolerances were relaxed for the restored NVFP4 coverage.
