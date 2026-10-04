@@ -25,6 +25,22 @@ The `dev` configure preset also enables all benchmarks, alongside products and t
 [Build system](../docs/maintainer/build-system.md) for presets and dependencies. Tests use a
 Python interpreter; a benchmark-only configuration does not require one.
 
+## NVFP4 scale expansion
+
+`ninfer_nvfp4_scale_compression_bench` measures the public lossless scale expansion Op at
+N/K = 5120/6144, 5120/17408 and 34816/5120. It uses deterministic uniform 15-, 17- and
+256-symbol byte distributions to cover palette-only, escaping and high-entropy records.
+The loader normally leaves high-entropy real weights uncompressed; that case measures decoder
+behavior, not a typical compressed-model workload. Each sample replays a one-Op CUDA Graph
+after a 256 MiB L2 flush, with 10 warmups and 100 measured samples. CSV output includes resident
+compressed bytes (payload plus offsets), median and p95 microseconds. It is an Op measurement,
+not an inference throughput result.
+
+```bash
+cmake --build build -j --target ninfer_nvfp4_scale_compression_bench
+./build/bench/ninfer_nvfp4_scale_compression_bench
+```
+
 ## Product benchmark
 
 For KVarN, use at least 128 decode tokens and include non-page-aligned prompt lengths so the
