@@ -58,6 +58,8 @@ namespace ninfer::ops {
  *   or materialize the projection and may choose their natural accumulator, activation
  *   quantization, staging, and workspace precision; those private choices are not semantic
  *   rounding boundaries.
+ *   Within an arithmetic profile, full versus partial private token tiles must preserve each
+ *   column's residual result; a live-column predicate must not change scaling/addition rounding.
  *
  * Compute policy:
  *   All policies permit the A16 implementations of Q4, Q5, Q8 and BF16. NVFP4 uses A16 for
