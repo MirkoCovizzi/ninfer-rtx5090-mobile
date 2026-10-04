@@ -35,6 +35,11 @@ struct Invocation {
     ops::LinearPolicy policy;
 };
 
+bool uses_a4(std::int32_t k, Invocation invocation) {
+    return invocation.policy == ops::LinearPolicy::AllowA4 &&
+           (k == 17408 || invocation.tokens > 8 * 16);
+}
+
 std::vector<std::int32_t> sampled_indices(std::int32_t extent) {
     std::vector<std::int32_t> result;
     for (const std::int32_t index :
@@ -186,7 +191,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed,
             CUDA_CHECK(cudaStreamDestroy(stream));
         }
 
-        const bool a4           = invocation.policy == ops::LinearPolicy::AllowA4;
+        const bool a4           = uses_a4(k, invocation);
         const std::string label = "NVFP4 linear_add [" + std::to_string(n) + "," +
                                   std::to_string(k) + "] " + (a4 ? "A4" : "A16") +
                                   " T=" + std::to_string(invocation.tokens);
@@ -222,7 +227,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed,
         }
         failures += verify_reduction(label, actual, expected, a4 ? kA4Tolerance : kA16Tolerance);
 
-        if (k == 6144 && invocation.tokens == 32 && !a4) {
+        if (k == 6144 && (invocation.tokens == 32 || invocation.tokens == 128) && !a4) {
             // Supplement the independent oracle with the width-invariance required by greedy
             // speculative verification: all columns must match ordinary one-column updates.
             output.copy_from_host(initial_residual.data(), output.bytes());
@@ -301,8 +306,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed,
             }
             failures += verify_reduction(
                 "compressed NVFP4 linear_add T=" + std::to_string(invocation.tokens), actual,
-                expected,
-                invocation.policy == ops::LinearPolicy::AllowA4 ? kA4Tolerance : kA16Tolerance);
+                expected, uses_a4(k, invocation) ? kA4Tolerance : kA16Tolerance);
             failures += output.verify_guards("compressed NVFP4 linear_add output");
         }
     }
@@ -353,30 +357,31 @@ int check_residual_cancellation(std::int32_t k) {
 
     int failures = 0;
     std::vector<int> widths;
-    // GDN output permits A4 only beyond the compact A16 frontier; MLP down uses A4 throughout.
-    if (k == 17408) {
-        for (int t = 1; t <= 48; ++t) { widths.push_back(t); }
-    }
+    // Qualify both arithmetic profiles against the same represented-input oracle. Exact
+    // width-invariance applies within a profile, not across A16/A4 dispatch boundaries.
+    for (int t = 1; t <= 48; ++t) { widths.push_back(t); }
     for (int t : {49, 63, 64, 65, 127, 128, 129, 191, 192, 193, 383, 384, 385, 511, 512, 513, 1023,
                   1024, 1025}) {
         widths.push_back(t);
     }
-    std::vector<std::uint16_t> reference;
+    std::array<std::vector<std::uint16_t>, 2> references;
     for (const int t : widths) {
+        const bool a4 = uses_a4(k, {t, ops::LinearPolicy::AllowA4});
         GuardedDeviceBuffer output(static_cast<std::size_t>(n) * t * sizeof(std::uint16_t));
         output.copy_from_host(initial.data(), output.bytes());
         Tensor x(device_input.data(), DType::BF16, {k, t});
         Tensor residual(output.data(), DType::BF16, {n, t});
         const auto capacity = ops::linear_add_workspace_capacity_bytes(
             QType::NVFP4, n, k, ops::LinearPolicy::AllowA4, t, t);
-        WorkspaceArena workspace(capacity);
+        WorkspaceArena workspace(std::max<std::size_t>(capacity, 256));
         ops::linear_add(x, weight, residual, ops::LinearPolicy::AllowA4, workspace, nullptr);
         cuda_check(cudaDeviceSynchronize(), "synchronize cancellation LinearAdd");
         std::vector<std::uint16_t> actual(static_cast<std::size_t>(n) * t);
         output.copy_to_host(actual.data(), output.bytes());
         const std::string label =
             "NVFP4 residual cancellation K=" + std::to_string(k) + " T=" + std::to_string(t);
-        if (t == widths.front()) { reference.assign(actual.begin(), actual.begin() + n); }
+        auto& reference = references[a4 ? 1 : 0];
+        if (reference.empty()) { reference.assign(actual.begin(), actual.begin() + n); }
         bool equal = true;
         for (std::size_t i = 0; i < actual.size(); ++i) { equal &= actual[i] == reference[i % n]; }
         if (!equal) {
@@ -385,7 +390,7 @@ int check_residual_cancellation(std::int32_t k) {
         }
         std::vector<double> observed(n);
         for (int row = 0; row < n; ++row) { observed[row] = bf16_to_f32(actual[row]); }
-        failures += verify_reduction(label, observed, oracle, kA4Tolerance);
+        failures += verify_reduction(label, observed, oracle, a4 ? kA4Tolerance : kA16Tolerance);
         failures += output.verify_guards(label);
     }
     failures += device_input.verify_guards("cancellation input");

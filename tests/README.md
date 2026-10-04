@@ -179,9 +179,14 @@ NINFER_TEST_ARTIFACT=/path/to/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 `--adaptive --draft-tokens 15` compares adaptive windows against MTP-off, retaining the same KV
-algorithm. `--tool-loop --kv-dtype kvarn` checks three greedy turns with 27 tool schemas and long
+algorithm. Add `--nvfp4-scale-compression` for the same comparison with compressed NVFP4 dense-FFN
+weights. `--tool-loop --kv-dtype kvarn` checks three greedy turns with 27 tool schemas and long
 tool results, including endpoint reuse and response replay after client-rewritten reasoning.
 It compares token IDs, reasoning/content, finish reason, and tool arguments against MTP-off.
+`--no-context-cache` disables retention for arithmetic checks on VRAM-constrained configurations;
+it cannot be combined with `--prefix-reuse` or `--tool-loop`. It does not reduce the selected
+concurrency, draft width, context ceiling, or output budget. A configuration that cannot reserve
+its resources is a startup-capacity failure, not a skipped parity result.
 The same KVarN harness accepts `--spec dflash2`, with draft counts 1, 3, 7, and 15, against the
 same-backend repeatability criterion; its artifact must contain the DFlash2 companion.
 KVarN MTP verification stops at group-publication boundaries so later queries see the same

@@ -364,16 +364,19 @@ void compressed_dense_binding() {
     fixture.file.write();
     artifact::Reader high_entropy(fixture.file.entry);
     const auto fallback = qwen::plan_load(high_entropy, {.nvfp4_scale_compression = true});
-    const auto gate_object =
+    const auto fallback_gate_object =
         fallback.parameter(std::get<qwen::DenseWeights>(fallback.weights().text.layers[0].ffn).gate)
             .binding.parts[0]
             .object;
+    bool found_fallback_gate = false;
     for (const auto& placement : fallback.materialization().device_objects) {
-        if (placement.object == gate_object) {
-            require(placement.bytes == high_entropy.geometry(gate_object).bytes,
+        if (placement.object == fallback_gate_object) {
+            found_fallback_gate = true;
+            require(placement.bytes == high_entropy.geometry(fallback_gate_object).bytes,
                     "high-entropy scales increased resident memory under compression");
         }
     }
+    require(found_fallback_gate, "high-entropy gate weight was not materialized");
 }
 
 void invalid_model_data() {
