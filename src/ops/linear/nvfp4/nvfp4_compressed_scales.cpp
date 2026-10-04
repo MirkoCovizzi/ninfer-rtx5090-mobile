@@ -34,16 +34,12 @@ Nvfp4CompressedScales compress_nvfp4_scale_plane(std::span<const std::byte> scal
             result.offsets.push_back(static_cast<std::uint32_t>(result.payload.size()));
             std::array<std::uint8_t, detail::kScaleCount> values{};
             std::array<std::uint16_t, 256> histogram{};
-            for (int row = 0; row < detail::kScaleRows; ++row) {
-                for (int group = 0; group < detail::kScaleGroups; ++group) {
-                    const int g = tile * detail::kScaleGroups + group;
-                    const std::size_t offset =
-                        (static_cast<std::size_t>(row_tile) * (columns / 64) + g / 4) * 512 +
-                        (row & 31) * 16 + (row >> 5) * 4 + (g & 3);
-                    const auto value = std::to_integer<std::uint8_t>(scales[offset]);
-                    values[row * detail::kScaleGroups + group] = value;
-                    ++histogram[value];
-                }
+            const auto base = (static_cast<std::size_t>(row_tile) * result.tiles_per_row + tile) *
+                              detail::kScaleCount;
+            for (int i = 0; i < detail::kScaleCount; ++i) {
+                const auto value = std::to_integer<std::uint8_t>(scales[base + i]);
+                values[i]        = value;
+                ++histogram[value];
             }
             std::array<std::uint16_t, 256> order{};
             for (int code = 0; code < 256; ++code) { order[code] = code; }
@@ -57,14 +53,15 @@ Nvfp4CompressedScales compress_nvfp4_scale_plane(std::span<const std::byte> scal
                 palette[code]   = static_cast<std::uint8_t>(i);
                 result.payload.push_back(code);
             }
+            result.payload.push_back(0); // Align the packed index words.
             const auto indices = result.payload.size();
             result.payload.resize(indices + detail::kIndexBytes, 0);
             const auto prefixes = result.payload.size();
             result.payload.resize(prefixes + detail::kPrefixBytes, 0);
             std::size_t escapes = 0;
             for (std::size_t i = 0; i < values.size(); ++i) {
-                if (i % (detail::kPrefixRows * detail::kScaleGroups) == 0) {
-                    const auto prefix = i / (detail::kPrefixRows * detail::kScaleGroups);
+                if (i % detail::kPrefixValues == 0) {
+                    const auto prefix                         = i / detail::kPrefixValues;
                     result.payload[prefixes + 2 * prefix]     = escapes & 0xff;
                     result.payload[prefixes + 2 * prefix + 1] = escapes >> 8;
                 }
@@ -76,6 +73,7 @@ Nvfp4CompressedScales compress_nvfp4_scale_plane(std::span<const std::byte> scal
                     ++escapes;
                 }
             }
+            result.payload.resize((result.payload.size() + 15U) & ~std::size_t{15U}, 0);
         }
     }
     return result;

@@ -1,5 +1,179 @@
 # Single-GPU serving performance
 
+## October 4, 2026 adaptive-MTP/compression qualification
+
+The PR candidate is based on `master` at `87f06898`. Qualification uses
+`models/qwen3_8_27b_nvfp4.v3.ninfer` on an RTX 5090 Laptop GPU (24 GiB), CUDA 13.1.115,
+GCC 15.3, Release/`sm_120a`. This artifact combines NVFP4 FFN weights with FP8 GDN output
+weights; its name does not imply that every projection is NVFP4.
+
+A short C=2/K15 greedy check initially diverged from MTP-off at token 26, identically with
+compression on/off and with Graphs/eager execution. Fixed K3 and K7 passed. Intermediate
+inspection localized the first difference to FP8 A8 LinearAdd with identical inputs: full
+versus partial token tiles permitted different MUL+ADD contraction. Explicit FP32 activation
+scaling followed by the residual FMA fixes that boundary without changing schedules or workspace.
+An A16 reduction-schedule candidate did not address this A8 route and was removed.
+
+The regression checks both real residual shapes at T=32/128 against ordinary columns and an
+independent FP64 oracle. It fails against master and passes the candidate. Unit FP8 codes isolate
+the cancellation case's epilogue rounding; an earlier full-range cancellation fixture exceeded
+the extra A16-tight represented-A8 criterion because of FP32 dot accumulation error, while passing
+the public A8 criterion. The final cancellation fixture keeps the dot exact rather than relaxing
+its criterion. Normal and wide-exponent inputs retain the full-range packed-weight oracle.
+
+Nineteen focused tests passed: codec exact decoding/guards/Graph replay, loading and binding,
+NVFP4 Linear/LinearAdd/SwiGLU, FP8 A8 Linear/LinearAdd/SwiGLU and input projections, replay state,
+MTP control, CLI/server options, OpenAI schema and request logging. Test review also corrected
+a stale artifact-object handle, restored compact A16 cancellation coverage, fixed its zero-size
+workspace fixture, and aligned the real test's logical context ceiling with its rounded KV
+reservation. No tolerances were relaxed for the restored NVFP4 coverage.
+
+Real Engine qualification passed two fresh repeats against MTP-off for:
+
+- C=2 adaptive K3/K7/K15, compression enabled, prefix reuse, 128/127 output tokens, eager
+  execution on all six KV formats (BF16, INT8, FP8, NVFP4, K8V4, KVarN).
+- C=2 adaptive K15 maximum, compressed KVarN, CUDA Graphs and prefix reuse: short prompts with
+  256/255 output tokens and ragged 8,190/8,183-token prompts with 256/255 output tokens.
+- C=8 fixed K15, compressed KVarN, CUDA Graphs, short prompts and ragged 256..249 output budgets,
+  with context retention disabled.
+
+Capacity failures remain distinct from arithmetic qualification. On this 24 GiB device, the
+C8/K15 16K-context corpus fixture could not reserve runtime memory, even without retention
+(4,861,090,560 bytes required versus 3,937,861,632 available). Short-context C8/K15 with eight
+retained checkpoint slots also failed reservation, including prefill-chunk 128
+(3,967,889,152 versus 3,937,861,632 bytes). Cache-disabled short-context execution passed;
+this does not qualify those larger configurations. DFlash/DFlash2, Vision generation, and other
+real artifacts were not requalified in this follow-up.
+
+### Matched public Engine measurements
+
+A public-Engine-only batch driver prepares two corpus slices (offsets 0/128), submits both before
+waiting, and requests 512 greedy tokens each. Sampling penalties, prefix reuse, retention and
+model stop tokens are disabled; raw output, KVarN, optimized proposal head, CUDA Graphs and
+2,048-token prefill chunks are enabled. Context capacity is prompt length + 1,536 per request,
+with shared capacity twice that. Each configuration uses one discarded warmup and three measured
+batches, run sequentially without other GPU workloads. Startup and token-file output are excluded
+from batch timing. Decode rate divides committed tokens by the difference of Engine decode
+Host-active plus device-wait counters, not summed overlapping request durations.
+
+The baseline is current master `87f06898`, fixed K3, compression disabled. Candidate fixed K3
+isolates integration overhead; adaptive K15 is a new capability, not an optimized-master K15
+comparison. Compression compares against the same candidate adaptive configuration. Results are
+arithmetic means of three batches; brackets give the full observed decode-rate range. Every
+measured output token sequence matched the corresponding master sequence exactly.
+
+| Prompt/request | Configuration | Decode tok/s [min,max] | Batch seconds | Mean physical batch |
+|---:|---|---:|---:|---:|
+| 2,048 | Master K3 | 237.43 [237.33,237.49] | 5.1803 | 1.985 |
+| 2,048 | Candidate K3 | 237.55 [237.52,237.59] | 5.1810 | 1.985 |
+| 2,048 | Candidate adaptive K15 | 350.69 [350.18,351.11] | 3.7941 | 1.794 |
+| 2,048 | Adaptive + compression | 346.17 [345.95,346.54] | 3.8369 | 1.794 |
+| 8,192 | Master K3 | 237.58 [237.55,237.62] | 8.0773 | 1.940 |
+| 8,192 | Candidate K3 | 237.39 [237.25,237.50] | 8.0864 | 1.940 |
+| 8,192 | Candidate adaptive K15 | 474.10 [473.77,474.28] | 5.9444 | 1.864 |
+| 8,192 | Adaptive + compression | 468.47 [468.06,468.72] | 5.9844 | 1.864 |
+
+Fixed-K3 decode changes are +0.05%/-0.08%, while batch latency changes are +0.01%/+0.11% at
+2K/8K; no material fixed-K3 improvement is claimed. Adaptive decode improves 47.7%/99.6% versus
+master K3, with batch latency down 26.8%/26.4%. Compression costs 1.29%/1.19% decode throughput
+and adds 1.13%/0.67% batch latency versus uncompressed adaptive execution. These claims cover
+these two corpus workloads and C=2 only.
+
+Compression reduces weight capacity from 21,183,929,344 to 20,781,619,200 bytes (383.67 MiB).
+Adaptive K15 adds 52.76 MiB of runtime reservation versus candidate K3; compression adds no
+further reservation in these profiles because existing peak workspace already accommodates
+expansion. Candidate K3 uses 1,536 more runtime bytes than master. Individual observed startup
+times were 5.15–5.17 seconds uncompressed and 7.61–7.62 seconds compressed (about +2.45 seconds);
+these are single startup observations, not a startup-latency distribution. Runtime reservations
+were 806,183,168/861,503,744 bytes for K3/K15 at 2K and 1,153,623,296/1,208,943,872 at 8K.
+
+### Public Op measurements and exceptions
+
+Cold CUDA Graph benchmarks use 10 warmups, 100 samples and a 256 MiB L2 flush per sample.
+For scale expansion, the baseline is the previous compressed decoder at `99d1be8f`, built with
+the same benchmark driver; it is not master, which has no compression Op. All nine cases are
+shown below. High-entropy inputs are decoder stress cases: the loader normally leaves such
+weights uncompressed. Alignment increases compressed residency by 0.18–1.35% in this matrix.
+
+| N/K | Symbols | Old median µs | New median µs | Time change |
+|---|---:|---:|---:|---:|
+| 5120/6144 | 15 | 8.224 | 6.144 | −25.3% |
+| 5120/6144 | 17 | 10.240 | 8.192 | −20.0% |
+| 5120/6144 | 256 | 12.288 | 10.240 | −16.7% |
+| 5120/17408 | 15 | 14.368 | 10.240 | −28.7% |
+| 5120/17408 | 17 | 16.448 | 16.288 | −1.0% |
+| 5120/17408 | 256 | 22.560 | 20.480 | −9.2% |
+| 34816/5120 | 15 | 24.576 | 20.416 | −16.9% |
+| 34816/5120 | 17 | 26.688 | 26.656 | −0.1% |
+| 34816/5120 | 256 | 36.928 | 34.816 | −5.7% |
+
+FP8 A8 LinearAdd compares against master on N=5120, K=6144/17408 and
+T=1,7,16,31,32,33,64,65,127,128. An initial pass showed K=17408 slowdowns of 11.3–30.9%; a
+reversed-order spot check and two full reversed-order confirmation sweeps did not reproduce
+them. Their cause remains unresolved; they are not dismissed as proven timing noise. The two
+confirmation sweeps give the following per-case ranges of candidate median time change:
+
+| T | K=6144 | K=17408 |
+|---:|---:|---:|
+| 1 | −0.30..−0.06% | −0.03..0.00% |
+| 7 | −0.07..−0.06% | −1.79..0.00% |
+| 16 | 0.00% | 0.00% |
+| 31 | −0.07..0.00% | 0.00..+0.03% |
+| 32 | −0.14..−0.06% | −0.06..+0.08% |
+| 33 | 0.00% | −0.02..+0.06% |
+| 64 | −0.07..−0.06% | −0.03..0.00% |
+| 65 | +0.22..+2.63% | 0.00..+0.97% |
+| 127 | +2.46..+3.33% | −1.19..+0.96% |
+| 128 | −0.05..0.00% | −1.15..0.00% |
+
+The first K=6144 pass ranged from −1.32% to +3.63% (worst at T=65). T=127's +3.33% initial
+cost reproduced in confirmation; the correctness fix retains this small Op-level regression.
+Neither Op timings nor the historical decoder results below establish a general serving gain.
+
+## NVFP4 compressed-scale expansion, concurrency two
+
+The September 26, 2026 comparison uses Qwen3.8-27B QUASAR NVFP4 v3 on the RTX 5090 Laptop
+GPU (24 GiB), driver 595.91.07, CUDA 13.1.115, Release/`sm_120a`. Compressed records now follow
+native swizzled byte order and are 16-byte aligned. The decoder expands two tiles concurrently
+per block, uses vector memory accesses and four-byte palette lookups, and scans only present
+literal escapes. Expansion remains lossless and uses the existing caller-owned workspace.
+
+Two public Engine requests are prepared before timing and submitted together. Each generates
+512 greedy tokens from `bench/fixtures/bench_corpus.ids`, with prompt offsets 0 and 128,
+prefix reuse and model stop tokens disabled, 2,048-token prefill chunks, KVarN K4V2-G128 KV,
+optimized proposal head and CUDA Graphs. Per-request context capacity is prompt length + 1,536;
+shared KV capacity is twice that. Each run discards one warmup and measures three batches.
+The adaptive comparison repeats both the old and new decoder to check timing drift; its entries
+average six measured batches per decoder. K3 uses three measured batches per decoder.
+
+| Prompt tokens/request | MTP policy | Old compressed decode (tok/s) | New compressed decode (tok/s) | Gain | Old batch (s) | New batch (s) |
+|---:|---|---:|---:|---:|---:|---:|
+| 8,192 | Adaptive K3/K7/K15 | 407.6 | 412.4 | 1.2% | 5.432 | 5.384 |
+| 2,048 | Fixed K3 | 238.1 | 240.1 | 0.8% | 4.954 | 4.920 |
+
+Decode throughput uses committed tokens divided by Engine decode Host-active plus device-wait
+interval counters, without summing overlapping request times. Mean physical batch sizes are
+1.84 and 1.99. These are small workload-specific improvements. The uncompressed 8K adaptive
+control measured 415.6 tok/s and 5.374 s/batch: compression still costs about 0.8% of decode
+throughput on this workload. All generated token IDs matched between old/new compression and
+the uncompressed control; fixed-K3 old/new outputs also matched exactly.
+
+The [scale-expansion Op benchmark](../bench/README.md#nvfp4-scale-expansion) measures cold
+CUDA Graph replay separately. At N=5120/K=17408, median expansion time changed from 16.38 to
+10.30 microseconds for 15-symbol inputs and from 18.46 to 16.42 microseconds for 17-symbol
+inputs. At N=34816/K=5120 it changed from 26.66 to 22.46 microseconds for 15-symbol inputs;
+the 17-symbol case was effectively unchanged at about 28.8 microseconds. These synthetic
+distributions establish decoder behavior, not an equivalent inference speedup.
+
+Qualification passed the independent byte-wise codec oracle and exact native-plane comparisons
+at real FFN shapes, including escapes, partial launch tails, output guards and repeated Graph
+replay. The loading/binding test and independent-oracle NVFP4 Linear A16/A4, LinearAdd and
+LinearSwiGLU suites also passed. Record alignment adds a small amount of resident padding;
+the `.ninfer` artifact and mathematical scale bytes are unchanged.
+The full serving configuration also reached ready with 401,408 KV tokens, concurrency two,
+Vision, adaptive MTP and 8 GiB Host KV: runtime reservation was 7.12 GiB and free VRAM was
+220.1 MiB. After shutdown, idle GPU usage returned to 31 MiB.
+
 ## RTX 5090 Laptop adaptive-MTP concurrency-two tuning
 
 The September 21, 2026 comparison uses Qwen3.8-27B QUASAR NVFP4 v3 on the RTX 5090 Laptop

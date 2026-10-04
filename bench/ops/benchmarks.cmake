@@ -32,6 +32,7 @@ ninfer_add_op_bench(ninfer_cast_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/cast_be
 ninfer_add_op_bench(ninfer_argmax_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/argmax_bench.cu")
 ninfer_add_op_bench(ninfer_causal_conv1d_silu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/causal_conv1d_silu_bench.cu")
 ninfer_add_op_bench(ninfer_linear_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_bench.cu")
+ninfer_add_op_bench(ninfer_nvfp4_scale_compression_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/nvfp4_scale_compression_bench.cu")
 ninfer_add_op_bench(ninfer_linear_topk_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_topk_bench.cu")
 ninfer_add_op_bench(ninfer_candidate_selector_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/candidate_selector_bench.cu")
 ninfer_add_op_bench(ninfer_gdn_input_proj_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/gdn_input_proj_bench.cu")

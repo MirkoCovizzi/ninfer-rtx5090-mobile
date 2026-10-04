@@ -277,9 +277,11 @@ Opt-in runtime NVFP4 scale compression does not change these artifact bytes. For
 FFN parents with `K%128=0`, the loader reads the stored scale plane, uploads only the code-plane
 prefix, and retains a lossless palette/escape encoding of scales in the same model-owned Device
 weight arena. Each 128-row by eight-K16-group tile has 15 palette entries, 4-bit indices (15 is an
-escape), and eight-row escape-rank prefixes. Linear/LinearSwiGLU/LinearAdd expand the exact scale
-bytes into caller-owned workspace before consuming the native swizzled layout. The FP32 divisor
-remains a scalar on the parent; no compressed plane is written back into `.ninfer`.
+escape), and escape-rank prefixes per 64 native scale bytes. Records are 16-byte aligned;
+indices follow native swizzled byte order so expansion uses contiguous vector loads and stores.
+Linear/LinearSwiGLU/LinearAdd expand the exact scale bytes into caller-owned workspace before
+consuming the native swizzled layout. The FP32 divisor remains a scalar on the parent;
+no compressed plane is written back into `.ninfer`.
 
 For logical row `n`, scale-group coordinate `g=floor(k/16)`, and `K_tiles=K/64`, define:
 
